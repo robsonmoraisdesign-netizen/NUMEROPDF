@@ -15,7 +15,7 @@ Aplicação desktop em Rust para organizar PDFs e numerar pranchas. Interface na
 - Numerar um intervalo, escolher número inicial e quantidade de dígitos; incluir/excluir o total, prefixo e separador. Total pode ser quantidade de folhas ou último número.
 - Escolher Helvetica, Times ou Courier; tamanho, negrito, itálico e cor. Ajuste de tamanho à área disponível.
 - Criar contagem em área manual, desenhada na prévia ou informada em pontos PDF.
-- Detectar candidatos ao marcador quadrado roxo com X, pelo raster. Exige contorno e diagonais; quadrados preenchidos são rejeitados.
+- Detectar candidatos a quadrados com X ou +, pelo raster, com cor e tolerância configuráveis. Quadrados preenchidos são rejeitados. O botão **Salvar marcador SVG** cria um símbolo escalável na cor e forma selecionadas.
 - Gerar prévia a partir dos mesmos bytes PDF que serão exportados; alternar antes/depois. Alterar configurações invalida a prévia anterior.
 - Salvar e carregar padrões JSON; desfazer a última operação de organização.
 - Salvar cópias atomicamente sem sobrescrever arquivos existentes.
@@ -24,7 +24,7 @@ Aplicação desktop em Rust para organizar PDFs e numerar pranchas. Interface na
 
 1. Abra um PDF.
 2. Selecione o intervalo: por padrão, a primeira folha fica fora quando há mais de uma página.
-3. Escolha `Substituir contagem existente`, `Quadrado roxo com X` ou `Área manual`.
+3. Escolha `Substituir contagem existente`, `Marcador colorido` ou `Área manual`.
 4. Configure a sequência e a aparência.
 5. Clique **Gerar prévia real**, confira as páginas e use **Salvar cópia**.
 
@@ -68,7 +68,7 @@ No JSON, `first_page` e `last_page` são índices inclusivos começando em **zer
 
 - Sem OCR de contagem em PDFs escaneados; números precisam ser texto editável para substituição automática.
 - Seleção entre vários candidatos e múltiplos intervalos com capas intermediárias ainda não estão na interface.
-- Marcador detectado por imagem, sem remoção vetorial definitiva. Cor fixa nesta alpha; padrões com outras cores/símbolos estão planejados.
+- Marcador detectado por imagem, sem remoção vetorial definitiva. Cores configuráveis e símbolos X/+; símbolos arbitrários ainda não suportados.
 - Não há importação de fontes TTF/OTF, miniaturas, exportação de imagens em lote ou histórico completo.
 - Zoom renderiza a folha inteira; visualização por blocos para zoom extremo ainda não implementada. Rasters acima dos limites do PDFCraft são recusados.
 - PDFs protegidos por senha são recusados. Edições em documentos assinados invalidam assinaturas; usar cópias adequadas.

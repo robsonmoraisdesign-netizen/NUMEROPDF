@@ -158,3 +158,35 @@ fn rotated_page_numbers_stay_inside_page() {
     assert_eq!(out.pages[1].rotation, 90);
     assert!(out.candidates(1).unwrap()[0].area.valid(&out.pages[1]));
 }
+
+#[test]
+fn marker_pattern_renders_numbers_only_after_opt_in() {
+    let mut d = Document::new_empty();
+    pdfcraft_organize::insert_blank_page(&mut d, 0, 200.0, 200.0).unwrap();
+    pdfcraft_edit::stamp(&mut d, 0, "MarkerTest", b"q 0.588235 0.117647 0.784314 RG 1 w 100 100 30 30 re S 100 100 m 130 130 l S 100 130 m 130 100 l S Q".to_vec()).unwrap();
+    let p = Pdf::from_bytes(write_full(&d, &SaveOptions::default()).unwrap()).unwrap();
+    let candidates = p
+        .marker_candidates(0, &numeropdf::marker::Pattern::default())
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    let config = Numbering {
+        mode: Mode::PurpleMarker,
+        first_page: 0,
+        last_page: 0,
+        ..Default::default()
+    };
+    assert!(p.numbered(&config).is_err());
+    let result = p
+        .numbered(&Numbering {
+            allow_marker_cover: true,
+            ..config
+        })
+        .unwrap();
+    assert_eq!(result.candidates(0).unwrap()[0].text, "01/01");
+    assert!(
+        result
+            .marker_candidates(0, &numeropdf::marker::Pattern::default())
+            .unwrap()
+            .is_empty()
+    );
+}

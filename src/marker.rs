@@ -1,13 +1,48 @@
-//! Conservative candidate detection for purple outlined squares with a purple X.
+//! Conservative detection for coloured outlined squares with an X or plus.
 //! Raster candidates must be reviewed; colour alone is never sufficient.
 use crate::Area;
 use image::RgbaImage;
 use std::collections::VecDeque;
-fn purple(p: &image::Rgba<u8>) -> bool {
-    let [r, g, b, a] = p.0;
-    a > 180 && r > 70 && b > 100 && (r as i16 - g as i16) > 35 && (b as i16 - g as i16) > 55
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub enum Symbol {
+    #[default]
+    X,
+    Plus,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Pattern {
+    pub color: [u8; 3],
+    pub tolerance: u8,
+    pub symbol: Symbol,
+}
+impl Default for Pattern {
+    fn default() -> Self {
+        Self {
+            color: [150, 30, 200],
+            tolerance: 55,
+            symbol: Symbol::X,
+        }
+    }
+}
+/// A scalable 10 mm marker; colour and symbol match the detector settings.
+pub fn svg(pattern: &Pattern) -> String {
+    let [r, g, b] = pattern.color;
+    let lines = match pattern.symbol {
+        Symbol::X => "M3 3L97 97M97 3L3 97",
+        Symbol::Plus => "M3 50H97M50 3V97",
+    };
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 100 100"><g fill="none" stroke="#{r:02X}{g:02X}{b:02X}" stroke-width="5" stroke-linejoin="round"><rect x="3" y="3" width="94" height="94"/><path d="{lines}"/></g></svg>"##
+    )
 }
 pub fn find(img: &RgbaImage) -> Vec<Area> {
+    find_pattern(img, &Pattern::default())
+}
+pub fn find_pattern(img: &RgbaImage, pattern: &Pattern) -> Vec<Area> {
+    let matches = |p: &image::Rgba<u8>| {
+        p[3] > 180 && (0..3).all(|i| p[i].abs_diff(pattern.color[i]) <= pattern.tolerance.min(100))
+    };
     let (w, h) = img.dimensions();
     let Some(len) = (w as usize)
         .checked_mul(h as usize)
@@ -20,7 +55,7 @@ pub fn find(img: &RgbaImage) -> Vec<Area> {
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) as usize;
-            if seen[i] || !purple(img.get_pixel(x, y)) {
+            if seen[i] || !matches(img.get_pixel(x, y)) {
                 continue;
             }
             let mut q = VecDeque::from([(x, y)]);
@@ -49,7 +84,7 @@ pub fn find(img: &RgbaImage) -> Vec<Area> {
                     }
                     let (nx, ny) = (nx as u32, ny as u32);
                     let j = (ny * w + nx) as usize;
-                    if !seen[j] && purple(img.get_pixel(nx, ny)) {
+                    if !seen[j] && matches(img.get_pixel(nx, ny)) {
                         seen[j] = true;
                         q.push_back((nx, ny));
                     }
@@ -68,7 +103,7 @@ pub fn find(img: &RgbaImage) -> Vec<Area> {
                 let radius = (bw / 25).max(1);
                 (py.saturating_sub(radius)..=(py + radius).min(h - 1)).any(|yy| {
                     (px.saturating_sub(radius)..=(px + radius).min(w - 1))
-                        .any(|xx| purple(img.get_pixel(xx, yy)))
+                        .any(|xx| matches(img.get_pixel(xx, yy)))
                 })
             };
             let mut hits = 0;
@@ -76,13 +111,11 @@ pub fn find(img: &RgbaImage) -> Vec<Area> {
                 let xx = x0 + (bw - 1) * k / 10;
                 let yy = y0 + (bh - 1) * k / 10;
                 let yr = y1 - (bh - 1) * k / 10;
-                if near(xx, yy)
-                    && near(xx, yr)
-                    && near(xx, y0)
-                    && near(xx, y1)
-                    && near(x0, yy)
-                    && near(x1, yy)
-                {
+                let symbol_matches = match pattern.symbol {
+                    Symbol::X => near(xx, yy) && near(xx, yr),
+                    Symbol::Plus => near(xx, (y0 + y1) / 2) && near((x0 + x1) / 2, yy),
+                };
+                if symbol_matches && near(xx, y0) && near(xx, y1) && near(x0, yy) && near(x1, yy) {
                     hits += 1;
                 }
             }
@@ -125,5 +158,32 @@ mod tests {
     fn solid_square_is_not_marker() {
         let im = RgbaImage::from_pixel(40, 40, image::Rgba([150, 30, 200, 255]));
         assert!(find(&im).is_empty());
+    }
+    #[test]
+    fn custom_colour_and_plus_do_not_match_x() {
+        let mut im = RgbaImage::from_pixel(100, 100, image::Rgba([255; 4]));
+        let ink = image::Rgba([10, 110, 220, 255]);
+        for i in 20..=60 {
+            for (x, y) in [(i, 20), (i, 60), (20, i), (60, i), (i, 40), (40, i)] {
+                im.put_pixel(x, y, ink);
+            }
+        }
+        assert!(find(&im).is_empty());
+        let p = Pattern {
+            color: [10, 110, 220],
+            tolerance: 20,
+            symbol: Symbol::Plus,
+        };
+        assert_eq!(find_pattern(&im, &p).len(), 1);
+        assert!(
+            find_pattern(
+                &im,
+                &Pattern {
+                    symbol: Symbol::X,
+                    ..p
+                }
+            )
+            .is_empty()
+        );
     }
 }

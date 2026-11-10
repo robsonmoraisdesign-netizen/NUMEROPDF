@@ -286,7 +286,7 @@ impl App {
         ui.radio_value(
             &mut self.config.mode,
             Mode::PurpleMarker,
-            "Quadrado roxo com X",
+            "Marcador colorido",
         );
         ui.radio_value(
             &mut self.config.mode,
@@ -294,8 +294,39 @@ impl App {
             "Área manual (nova contagem)",
         );
         if self.config.mode == Mode::PurpleMarker {
+            ui.horizontal(|ui| {
+                ui.label("Cor do marcador");
+                ui.color_edit_button_srgb(&mut self.config.marker_pattern.color);
+            });
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.config.marker_pattern.symbol,
+                    numeropdf::marker::Symbol::X,
+                    "Quadrado com X",
+                );
+                ui.selectable_value(
+                    &mut self.config.marker_pattern.symbol,
+                    numeropdf::marker::Symbol::Plus,
+                    "Quadrado com +",
+                );
+            });
+            ui.add(
+                egui::Slider::new(&mut self.config.marker_pattern.tolerance, 5..=100)
+                    .text("Tolerância de cor"),
+            );
+            if ui.button("Salvar marcador SVG").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("marcador-numeropdf.svg")
+                    .save_file()
+            {
+                let svg = numeropdf::marker::svg(&self.config.marker_pattern);
+                self.status = numeropdf::save_new(&path, svg.as_bytes())
+                    .map(|_| "Marcador SVG salvo (10 mm, escalável)".into())
+                    .unwrap_or_else(|e| e.to_string());
+            }
+
             ui.label(
-                "Marcadores devem ter contorno e X roxos. Detecção por imagem; revise cada página.",
+                "O contorno e o símbolo devem ter a cor escolhida. Detecção por imagem; revise cada página.",
             );
             ui.checkbox(
                 &mut self.config.allow_marker_cover,

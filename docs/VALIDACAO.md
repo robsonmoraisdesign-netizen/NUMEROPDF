@@ -18,22 +18,22 @@ Ambiente: Linux, Rust 1.99.1.
 - `cargo check --all-targets`: passou.
 - `cargo fmt --check`: passou.
 - `cargo clippy --all-targets --no-deps -- -D warnings`: passou para NUMEROPDF; o upstream tem um aviso de importação não usada em hayro-interpret.
-- `cargo test`: 6 testes unitários + 7 de integração passaram.
+- `cargo test`: 7 testes unitários + 8 de integração passaram.
 - Substituição verificou contagem antiga removida, nova contagem extraível, capa intacta e original em memória preservado.
 - Extração verificou ordem e mesclagem verificou quantidade.
 - Testes incluem página rotacionada, múltiplos candidatos, contagem ausente, tamanho incompatível, overflow e proteção contra sobrescrita.
-- Marcador: quadrado sem X e quadrado preenchido são rejeitados; contorno com X é aceito.
+- Marcador: quadrado sem X e quadrado preenchido são rejeitados; contorno com X é aceito. Padrão azul com + é reconhecido apenas com a configuração correspondente. Teste ponta a ponta exige habilitar a cobertura, insere contagem extraível e verifica que o marcador deixa de aparecer no raster.
 
 Validação privada adicional com cinco PDFs fornecidos pelo usuário: 34 páginas totais, 29 pranchas numeradas e cinco folhas iniciais sem numeração. Renumeração começando em 15 concluída nos cinco documentos. Comparação independente com MuPDF em 72 DPI: zero pixels alterados fora da região reservada ao número em todas as páginas. Recorte ampliado revisado visualmente. Nenhum documento nem dado pessoal foi incluído no repositório.
 
 ## Não validado
 
-Interface em uma sessão desktop real; executável no Windows; documentos externos além dos exemplos; OCR; fontes personalizadas; variantes de marcadores; remoção definitiva do marcador. A compilação Windows depende do workflow de Actions e deve ser conferida separadamente.
+Interface em uma sessão desktop real; executável no Windows; documentos externos além dos exemplos; OCR; fontes personalizadas; variantes de marcadores além de X/+; remoção definitiva do marcador. A compilação Windows depende do workflow de Actions e deve ser conferida separadamente.
 
 ## Critérios para sair de alpha
 
 1. Validar abertura, zoom, seleção de área, prévia e exportação em Windows.
 2. Adicionar seleção visual de candidatos, ignorar capas no meio da sequência e grupos por ambiente.
-3. Detecção vetorial, remoção de marcador com preservação do fundo e cores configuráveis.
+3. Detecção vetorial, remoção de marcador com preservação do fundo.
 4. Fontes adicionais, alinhamento configurável, miniaturas e exportação de imagens em lote.
 5. Renderização por blocos com cancelamento, cache limitado e comparação em zoom extremo.

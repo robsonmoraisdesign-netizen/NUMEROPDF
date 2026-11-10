@@ -71,6 +71,7 @@ pub struct Numbering {
     pub color: [u8; 3],
     /// Marker replacement is a visual white cover, never represented as secure deletion.
     pub allow_marker_cover: bool,
+    pub marker_pattern: marker::Pattern,
 }
 impl Default for Numbering {
     fn default() -> Self {
@@ -97,6 +98,7 @@ impl Default for Numbering {
             italic: false,
             color: [0; 3],
             allow_marker_cover: false,
+            marker_pattern: marker::Pattern::default(),
         }
     }
 }
@@ -240,9 +242,13 @@ impl Pdf {
         }
         Ok(result)
     }
-    pub fn marker_candidates(&self, page: usize) -> Result<Vec<Candidate>> {
+    pub fn marker_candidates(
+        &self,
+        page: usize,
+        pattern: &marker::Pattern,
+    ) -> Result<Vec<Candidate>> {
         let image = self.render(page, 2.0)?;
-        Ok(marker::find(&image)
+        Ok(marker::find_pattern(&image, pattern)
             .into_iter()
             .map(|area| Candidate {
                 page,
@@ -252,7 +258,7 @@ impl Pdf {
                     width: area.width / 2.0,
                     height: area.height / 2.0,
                 },
-                text: "Marcador roxo (revisar)".into(),
+                text: "Marcador (revisar)".into(),
                 block: None,
             })
             .collect())
@@ -277,7 +283,7 @@ impl Pdf {
                     let candidates = if mode == Mode::Existing {
                         self.candidates(page)?
                     } else {
-                        self.marker_candidates(page)?
+                        self.marker_candidates(page, &config.marker_pattern)?
                     };
                     if candidates.len() != 1 {
                         return Err(err(format!(
