@@ -1,0 +1,13 @@
+NUMEROPDF
+Código original deste projeto: MIT OR Apache-2.0.
+
+Usa módulos de PDFCraft, Copyright (c) 2026 ArtCraft Team and the PdfCraft contributors,
+licenciados sob MIT OR Apache-2.0. Fonte e avisos completos:
+https://github.com/storytold/pdfcraft
+Submódulo: upstream/pdfcraft (revisão registrada no gitlink).
+Os arquivos NOTICE, LICENSE-MIT, LICENSE-APACHE e ATTRIBUTION.toml do upstream
+continuam no submódulo. Marcas visuais ArtCraft não são incorporadas à interface NUMEROPDF.
+
+Interface: egui/eframe (MIT OR Apache-2.0); diálogos: rfd (MIT).
+Fontes padrão e demais dependências conservam suas licenças originais.
+O marcador SVG deste projeto é original, sob MIT OR Apache-2.0.

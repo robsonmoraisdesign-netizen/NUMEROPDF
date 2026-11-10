@@ -1,0 +1,5 @@
+/target/
+/local/
+*.pdf
+*.png
+*.jpg

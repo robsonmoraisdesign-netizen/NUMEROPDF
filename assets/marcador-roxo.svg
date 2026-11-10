@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 100 100">
+  <title>NUMEROPDF — marcador de posição</title>
+  <g fill="none" stroke="#961EC8" stroke-width="5" stroke-linejoin="round">
+    <rect x="3" y="3" width="94" height="94"/>
+    <path d="M3 3L97 97M97 3L3 97"/>
+  </g>
+</svg>

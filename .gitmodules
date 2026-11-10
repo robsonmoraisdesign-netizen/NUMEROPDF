@@ -1,0 +1,3 @@
+[submodule "upstream/pdfcraft"]
+	path = upstream/pdfcraft
+	url = https://github.com/storytold/pdfcraft.git

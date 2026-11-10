@@ -1,0 +1,12 @@
+{
+  "first_page": 1,
+  "last_page": 6,
+  "start": 1,
+  "digits": 2,
+  "mode": "Existing",
+  "show_total": true,
+  "total_is_last": false,
+  "size": 14.0,
+  "auto_fit": true,
+  "bold": true
+}

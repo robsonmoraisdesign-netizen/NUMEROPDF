@@ -1,0 +1,35 @@
+name: Testar e compilar NUMEROPDF
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Rust estável
+        run: rustup update stable --no-self-update
+      - name: Testes
+        run: cargo test --locked
+      - name: Compilar Windows
+        run: cargo build --release --locked
+      - name: Preparar pacote portátil
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/NUMEROPDF
+          Copy-Item target/release/numeropdf.exe dist/NUMEROPDF/
+          Copy-Item README.md,NOTICE,LICENSE-MIT,LICENSE-APACHE dist/NUMEROPDF/
+          New-Item -ItemType Directory -Force dist/NUMEROPDF/third-party
+          Copy-Item upstream/pdfcraft/NOTICE,upstream/pdfcraft/LICENSE-MIT,upstream/pdfcraft/LICENSE-APACHE,upstream/pdfcraft/ATTRIBUTION.md dist/NUMEROPDF/third-party/
+          Copy-Item assets/marcador-roxo.svg dist/NUMEROPDF/
+          Compress-Archive dist/NUMEROPDF dist/NUMEROPDF-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NUMEROPDF-Windows-x64
+          path: dist/NUMEROPDF-Windows-x64.zip
+          if-no-files-found: error
