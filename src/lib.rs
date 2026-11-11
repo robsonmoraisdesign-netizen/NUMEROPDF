@@ -1,5 +1,7 @@
 //! NUMEROPDF: native PDF operations, backed by pinned PdfCraft crates.
 #![forbid(unsafe_code)]
+pub mod batch;
+pub mod layout;
 pub mod marker;
 use pdfcraft_cos::{Document, SaveOptions, write_full};
 use pdfcraft_edit::{AddedText, Align, Content, Family};
@@ -41,6 +43,7 @@ pub struct Candidate {
     pub area: Area,
     pub text: String,
     pub block: Option<usize>,
+    pub source_size: Option<f64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Mode {
@@ -48,7 +51,7 @@ pub enum Mode {
     Manual,
     PurpleMarker,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Numbering {
     /// Zero-based, inclusive page interval. UI converts from one-based.
@@ -64,6 +67,7 @@ pub struct Numbering {
     pub area: Area,
     pub size: f64,
     pub auto_fit: bool,
+    pub inherit_size: bool,
     /// 0 Helvetica, 1 Times, 2 Courier.
     pub font: usize,
     pub bold: bool,
@@ -93,6 +97,7 @@ impl Default for Numbering {
             },
             size: 14.0,
             auto_fit: true,
+            inherit_size: true,
             font: 0,
             bold: true,
             italic: false,
@@ -197,18 +202,22 @@ impl Pdf {
             .ok_or_else(|| err("Raster inválido"))
     }
     pub fn candidates(&self, page: usize) -> Result<Vec<Candidate>> {
+        let doc = self.document()?;
+        self.candidates_in(&doc, page)
+    }
+    fn candidates_in(&self, doc: &Document, page: usize) -> Result<Vec<Candidate>> {
         let info = self
             .pages
             .get(page)
             .ok_or_else(|| err("Página inexistente"))?;
-        let doc = self.document()?;
-        let blocks = pdfcraft_edit::text_blocks(&doc, page).map_err(err)?;
+        let rules = pdfcraft_edit::page_rules(doc, page).unwrap_or_default();
+        let blocks = pdfcraft_edit::text_blocks(doc, page).map_err(err)?;
         let mut result = Vec::new();
         for (index, b) in blocks.iter().enumerate() {
             if !is_page_number(&b.text) {
                 continue;
             }
-            let [x0, y0, x1, y1] = b.rect;
+            let [x0, y0, x1, y1] = layout::enclosing_box(b.rect, &rules);
             let corners = [[x0, y0], [x0, y1], [x1, y0], [x1, y1]]
                 .map(|p| info.user_to_view(p[0] as f32, p[1] as f32));
             let x = corners
@@ -238,6 +247,7 @@ impl Pdf {
                 },
                 text: b.text.clone(),
                 block: Some(index),
+                source_size: Some(b.size),
             });
         }
         Ok(result)
@@ -260,6 +270,7 @@ impl Pdf {
                 },
                 text: "Marcador (revisar)".into(),
                 block: None,
+                source_size: None,
             })
             .collect())
     }
@@ -277,11 +288,12 @@ impl Pdf {
         let mut doc = self.document()?;
         for (offset, page) in (config.first_page..=config.last_page).enumerate() {
             let info = &self.pages[page];
+            let mut preferred_size = config.size;
             let area = match config.mode {
                 Mode::Manual => config.area,
                 mode => {
                     let candidates = if mode == Mode::Existing {
-                        self.candidates(page)?
+                        self.candidates_in(&doc, page)?
                     } else {
                         self.marker_candidates(page, &config.marker_pattern)?
                     };
@@ -293,6 +305,9 @@ impl Pdf {
                         )));
                     }
                     let c = &candidates[0];
+                    if config.inherit_size {
+                        preferred_size = c.source_size.unwrap_or(config.size);
+                    }
                     if let Some(block) = c.block {
                         pdfcraft_edit::clear_block(&mut doc, page, block).map_err(err)?;
                     }
@@ -349,9 +364,9 @@ impl Pdf {
             }
             let fit = (area.width / unit).min(area.height / 1.2);
             let size = if config.auto_fit {
-                config.size.min(fit)
+                preferred_size.min(fit)
             } else {
-                config.size
+                preferred_size
             };
             if size < 1.0 || size > fit + 0.01 {
                 return Err(err(

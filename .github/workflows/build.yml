@@ -15,7 +15,7 @@ jobs:
       - name: Rust estável
         run: rustup update stable --no-self-update
       - name: Testes
-        run: cargo test --locked
+        run: cargo test --release --locked
       - name: Compilar Windows
         run: cargo build --release --locked
       - name: Preparar pacote portátil

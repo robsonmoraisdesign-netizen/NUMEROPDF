@@ -37,3 +37,13 @@ Interface em uma sessão desktop real; executável no Windows; documentos extern
 3. Detecção vetorial, remoção de marcador com preservação do fundo.
 4. Fontes adicionais, alinhamento configurável, miniaturas e exportação de imagens em lote.
 5. Renderização por blocos com cancelamento, cache limitado e comparação em zoom extremo.
+
+
+## Versão 0.2 — usabilidade e desempenho
+
+- 22 testes automatizados: sequência, segurança de gravação, marcador, organização, remoção do texto anterior, fonte e célula detectadas, lote com falha intermediária, cache do renderizador e entrada da interface.
+- Teste de interface egui sem janela verifica página centralizada, Ctrl + roda alterando zoom do PDF sem alterar escala da interface, e arquivos múltiplos enfileirados durante operação.
+- Teste do renderizador verifica que redesenhar a interface não provoca nova rasterização, que o parser é mantido entre escalas e que retornar a uma escala em cache não renderiza novamente.
+- Lote usa apenas um documento por vez e continua após falhas; todos os arquivos de saída usam gravação sem sobrescrita.
+- `cargo test --locked`, `cargo fmt --check` e Clippy do projeto com avisos tratados como erro. Uma advertência de importação não utilizada permanece no fornecedor hayro-interpret, não modificado.
+- Ainda é necessária validação interativa no Windows, especialmente arrastar arquivos do Explorer e uso com telas de DPI diferentes. Não há medição de velocidade em máquina do usuário.

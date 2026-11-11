@@ -190,3 +190,52 @@ fn marker_pattern_renders_numbers_only_after_opt_in() {
             .is_empty()
     );
 }
+
+#[test]
+fn batch_continues_after_failure_and_never_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.pdf");
+    let b = dir.path().join("b.pdf");
+    let bad = dir.path().join("bad.pdf");
+    fixture().save(&a).unwrap();
+    fixture().extract(&[0, 1]).unwrap().save(&b).unwrap();
+    std::fs::write(&bad, b"not pdf").unwrap();
+    let inputs = vec![a.clone(), bad, b];
+    let config = Numbering {
+        start: 15,
+        ..Default::default()
+    };
+    let mut progress = vec![];
+    let results = numeropdf::batch::number_files(&inputs, dir.path(), &config, true, |n, total| {
+        progress.push((n, total))
+    });
+    assert_eq!(progress, vec![(1, 3), (2, 3), (3, 3)]);
+    assert!(results[1].error.is_some());
+    let out = Pdf::open(results[2].output.as_ref().unwrap()).unwrap();
+    assert_eq!(out.candidates(1).unwrap()[0].text, "15/01");
+    assert_eq!(
+        Pdf::open(&a).unwrap().candidates(1).unwrap()[0].text,
+        "01/02"
+    );
+    assert!(
+        numeropdf::batch::number_files(&inputs, dir.path(), &config, true, |_, _| {})
+            .iter()
+            .all(|r| r.error.is_some())
+    );
+}
+#[test]
+fn detects_cell_and_original_font_size() {
+    let pdf = fixture();
+    let c = pdf.candidates(1).unwrap().remove(0);
+    assert!((c.area.width - 57.0).abs() < 0.01);
+    assert!((c.area.height - 27.0).abs() < 0.01);
+    assert_eq!(c.source_size, Some(14.0));
+    let out = pdf
+        .numbered(&Numbering {
+            last_page: 2,
+            size: 4.0,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(out.candidates(1).unwrap()[0].source_size, Some(14.0));
+}

@@ -2,16 +2,18 @@
 
 Aplicação desktop em Rust para organizar PDFs e numerar pranchas. Interface nativa egui; operações PDF e renderização por módulos do [PDFCraft](https://github.com/storytold/pdfcraft), fixados em um submódulo. Sem JavaScript, Electron, Tauri ou serviços remotos de processamento.
 
-**Estado: alpha 0.1.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
+**Estado: alpha 0.2.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
 
 ## Implementado
 
-- Abrir PDFs e visualizar páginas com zoom de 25% a 400% e barras de rolagem.
-- Renderizar em segundo plano; refazer o raster ao mudar zoom ou página.
+- Abrir vários PDFs por seleção ou arrastar e soltar. Página centralizada e ajustada à tela na abertura.
+- Zoom de 10% a 800%, pelo controle ou Ctrl + rolagem, sem bloquear navegação durante processamento.
+- Renderizador persistente em segundo plano, cache de imagens de 64 MiB e atraso de 150 ms para agrupar mudanças de zoom. A imagem anterior continua visível durante o refinamento.
+- Numerar PDFs em lote, com sequência reiniciada por documento, progresso e relatório de falhas. Arquivos existentes nunca são sobrescritos.
 - Mesclar arquivos, extrair intervalos e dividir em um arquivo por página.
 - Extrair/reordenar listas de páginas pelo CLI.
 - Exportar a página visível em PNG com DPI configurável.
-- Reconhecer blocos de texto completos `01/06`, localizar sua caixa e substituí-los sem cobertura branca. A edição remove o bloco original pelo PDFCraft.
+- Reconhecer blocos de texto completos `01/06`, detectar tamanho da fonte e limites da célula fechada (ou os limites do próprio texto), e substituí-los sem cobertura branca. A edição remove o bloco original pelo PDFCraft.
 - Numerar um intervalo, escolher número inicial e quantidade de dígitos; incluir/excluir o total, prefixo e separador. Total pode ser quantidade de folhas ou último número.
 - Escolher Helvetica, Times ou Courier; tamanho, negrito, itálico e cor. Ajuste de tamanho à área disponível.
 - Criar contagem em área manual, desenhada na prévia ou informada em pontos PDF.
@@ -76,3 +78,11 @@ No JSON, `first_page` e `last_page` são índices inclusivos começando em **zer
 - Não foi feita validação interativa do executável Windows.
 
 Arquitetura e evidências: [docs/VALIDACAO.md](docs/VALIDACAO.md). Licenças do PDFCraft e dependências são preservadas no submódulo; a aplicação não utiliza marcas visuais ArtCraft.
+
+## Uso das melhorias da versão 0.2
+
+Abra ou solte vários PDFs sobre a janela. No painel **Lote**, selecione o documento para conferir a prévia, ajuste a numeração e use **Numerar lote e salvar…**. A opção de última folha adapta o intervalo ao tamanho de cada documento; o número inicial reinicia em cada arquivo. Um erro é informado e os demais PDFs continuam. O limite da lista é de 1.000 arquivos.
+
+Segure **Ctrl** e gire a roda sobre a página para aproximar ou afastar. A página fica centralizada quando cabe na área disponível; com zoom maior, as barras permitem examinar toda a folha. Ao mudar zoom, a visualização volta ao centro.
+
+Em **Substituir contagem existente**, o tamanho original é detectado por padrão e ajustado para caber. Desmarque **Detectar tamanho da fonte existente** para usar o tamanho manual. A detecção automática desta versão reconhece texto editável no formato `01/06`; não inclui OCR de contagens em imagens. Candidatos ausentes ou ambíguos geram erro para revisão.

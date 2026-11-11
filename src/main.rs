@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 mod ui;
+mod viewer;
 use numeropdf::{Numbering, Pdf};
 use std::path::Path;
 fn main() {

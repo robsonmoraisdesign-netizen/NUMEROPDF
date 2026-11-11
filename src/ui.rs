@@ -8,7 +8,7 @@ use std::{
 enum Done {
     Document(Arc<Pdf>, String),
     Preview(Arc<Pdf>),
-    Image(image::RgbaImage),
+    Batch(Vec<numeropdf::batch::Outcome>),
     Message(String),
 }
 type Work = std::result::Result<Done, String>;
@@ -20,8 +20,16 @@ pub struct App {
     page: usize,
     zoom: f32,
     dpi: u32,
-    texture: Option<egui::TextureHandle>,
-    render_key: Option<(usize, u32, bool)>,
+    viewer: crate::viewer::Viewer,
+    files: Vec<std::path::PathBuf>,
+    pending_open: Option<std::path::PathBuf>,
+    batch_to_end: bool,
+    results: Vec<numeropdf::batch::Outcome>,
+    progress: Arc<std::sync::atomic::AtomicUsize>,
+    fit_page: bool,
+    previous_view: Option<(usize, u32)>,
+    #[cfg(test)]
+    geometry: Option<(egui::Rect, egui::Rect)>,
     rx: Option<mpsc::Receiver<Work>>,
     status: String,
     name: String,
@@ -32,6 +40,9 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        Self::initial()
+    }
+    fn initial() -> Self {
         Self {
             document: None,
             preview: None,
@@ -40,8 +51,16 @@ impl App {
             page: 0,
             zoom: 1.0,
             dpi: 150,
-            texture: None,
-            render_key: None,
+            viewer: Default::default(),
+            files: Vec::new(),
+            pending_open: None,
+            batch_to_end: true,
+            results: Vec::new(),
+            progress: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fit_page: true,
+            previous_view: None,
+            #[cfg(test)]
+            geometry: None,
             rx: None,
             status: "Abra um PDF para começar".into(),
             name: String::new(),
@@ -74,7 +93,6 @@ impl App {
     }
     fn changed(&mut self) {
         self.preview = None;
-        self.render_key = None;
     }
     fn poll(&mut self, ctx: &egui::Context) {
         let result = self.rx.as_ref().and_then(|rx| match rx.try_recv() {
@@ -93,25 +111,21 @@ impl App {
                     self.name = name;
                     self.page = 0;
                     self.preview = None;
-                    self.texture = None;
-                    self.render_key = None;
+                    self.fit_page = true;
+
                     self.status =
                         "PDF aberto. Configure a numeração ou organize as páginas.".into();
                 }
                 Ok(Done::Preview(pdf)) => {
                     self.preview = Some(pdf);
                     self.show_preview = true;
-                    self.render_key = None;
+
                     self.status = "Prévia pronta. Confira as páginas e salve uma cópia.".into();
                 }
-                Ok(Done::Image(im)) => {
-                    let color = egui::ColorImage::from_rgba_premultiplied(
-                        [im.width() as usize, im.height() as usize],
-                        im.as_raw(),
-                    );
-                    self.texture =
-                        Some(ctx.load_texture("pagina", color, egui::TextureOptions::LINEAR));
-                    self.status = "Visualização atualizada".into();
+                Ok(Done::Batch(results)) => {
+                    let ok = results.iter().filter(|r| r.output.is_some()).count();
+                    self.status = format!("Lote concluído: {ok}/{} arquivos salvos", results.len());
+                    self.results = results;
                 }
                 Ok(Done::Message(message)) => self.status = message,
                 Err(e) => {
@@ -123,21 +137,121 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
-    fn open(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .pick_file()
-        {
-            let name = path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            self.launch("Abrindo PDF…", move || {
-                Pdf::open(&path)
-                    .map(|p| Done::Document(Arc::new(p), name))
-                    .map_err(|e| e.to_string())
-            });
+    fn add_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        let mut first = None;
+        for path in paths {
+            if !path
+                .extension()
+                .is_some_and(|s| s.eq_ignore_ascii_case("pdf"))
+            {
+                continue;
+            }
+            if first.is_none() {
+                first = Some(path.clone());
+            }
+            if !self.files.contains(&path) && self.files.len() < 1000 {
+                self.files.push(path);
+            }
         }
+        if self.document.is_none() && first.is_some() {
+            self.pending_open = first;
+        }
+    }
+    fn open_path(&mut self, path: std::path::PathBuf) {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        self.launch("Abrindo PDF…", move || {
+            Pdf::open(&path)
+                .map(|p| Done::Document(Arc::new(p), name))
+                .map_err(|e| e.to_string())
+        });
+    }
+    fn open(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .pick_files()
+        {
+            self.pending_open = paths.first().cloned();
+            self.add_files(paths);
+        }
+    }
+    fn batch_controls(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing(format!("Lote · {} PDFs", self.files.len()), |ui| {
+            if ui.button("Adicionar PDFs").clicked() {
+                self.open();
+            }
+            let mut remove = None;
+            egui::ScrollArea::vertical()
+                .id_salt("batch-files")
+                .max_height(180.0)
+                .show_rows(ui, 24.0, self.files.len(), |ui, range| {
+                    for i in range {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("×").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    self.files[i]
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                )
+                                .clicked()
+                            {
+                                self.pending_open = Some(self.files[i].clone());
+                            }
+                        });
+                    }
+                });
+            if let Some(i) = remove {
+                self.files.remove(i);
+            }
+            ui.checkbox(
+                &mut self.batch_to_end,
+                "Até a última folha de cada documento",
+            );
+            ui.label("A sequência reinicia em cada PDF. Originais preservados.");
+            if ui
+                .add_enabled(
+                    self.rx.is_none() && !self.files.is_empty(),
+                    egui::Button::new("Numerar lote e salvar…"),
+                )
+                .clicked()
+                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+            {
+                let inputs = self.files.clone();
+                let config = self.config.clone();
+                let to_end = self.batch_to_end;
+                let progress = self.progress.clone();
+                progress.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.results.clear();
+                self.launch("Numerando lote…", move || {
+                    Ok(Done::Batch(numeropdf::batch::number_files(
+                        &inputs,
+                        &dir,
+                        &config,
+                        to_end,
+                        |done, _| {
+                            progress.store(done, std::sync::atomic::Ordering::Relaxed);
+                        },
+                    )))
+                })
+            }
+            ui.label(format!(
+                "Processados: {}",
+                self.progress.load(std::sync::atomic::Ordering::Relaxed)
+            ));
+            for result in &self.results {
+                if let Some(e) = &result.error {
+                    ui.colored_label(Color32::YELLOW, format!("{}: {e}", result.input.display()));
+                }
+            }
+        });
     }
     fn save(&mut self) {
         if let Some(pdf) = self.visible()
@@ -233,7 +347,7 @@ impl App {
         ui.heading("Numeração de pranchas");
         ui.label("Configure, revise e salve uma cópia.");
         ui.separator();
-        let old = serde_json::to_string(&self.config).unwrap_or_default();
+        let old = self.config.clone();
         let len = self.document.as_ref().map_or(1, |p| p.pages.len());
         self.config.first_page = self.config.first_page.min(len - 1);
         self.config.last_page = self.config.last_page.min(len - 1);
@@ -337,7 +451,6 @@ impl App {
             if ui.button("Desenhar área na página").clicked() {
                 self.choose_area = true;
                 self.show_preview = false;
-                self.render_key = None;
             }
             for (label, v) in [
                 ("X (pt)", &mut self.config.area.x),
@@ -371,13 +484,17 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.config.size).range(1.0..=200.0));
             ui.label("pt");
         });
+        ui.checkbox(
+            &mut self.config.inherit_size,
+            "Detectar tamanho da fonte existente",
+        );
         ui.checkbox(&mut self.config.auto_fit, "Ajustar ao espaço disponível");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.config.bold, "Negrito");
             ui.checkbox(&mut self.config.italic, "Itálico");
         });
         ui.color_edit_button_srgb(&mut self.config.color);
-        if old != serde_json::to_string(&self.config).unwrap_or_default() {
+        if old != self.config {
             self.changed();
         }
         ui.separator();
@@ -396,12 +513,7 @@ impl App {
                     .map_err(|e| e.to_string())
             });
         }
-        if ui
-            .checkbox(&mut self.show_preview, "Mostrar resultado (antes/depois)")
-            .changed()
-        {
-            self.render_key = None;
-        }
+        ui.checkbox(&mut self.show_preview, "Mostrar resultado (antes/depois)");
         ui.label(if self.preview.is_some() {
             "Prévia calculada e pronta para salvar"
         } else {
@@ -441,9 +553,22 @@ impl App {
         });
     }
 }
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl App {
+    fn draw(&mut self, ctx: &egui::Context) {
         self.poll(ctx);
+        let dropped = ctx.input_mut(|i| {
+            std::mem::take(&mut i.raw.dropped_files)
+                .into_iter()
+                .filter_map(|f| f.path)
+                .collect()
+        });
+        self.add_files(dropped);
+        if self.rx.is_none()
+            && let Some(path) = self.pending_open.take()
+        {
+            self.open_path(path);
+        }
+
         let busy = self.rx.is_some();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -511,6 +636,7 @@ impl eframe::App for App {
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.batch_controls(ui);
                     ui.add_enabled_ui(!busy && self.document.is_some(), |ui| self.settings(ui));
                 });
             });
@@ -521,19 +647,19 @@ impl eframe::App for App {
                     ui.separator();
                     let mut number = self.page + 1;
                     if ui
-                        .add_enabled(self.page > 0 && !busy, egui::Button::new("◀"))
+                        .add_enabled(self.page > 0, egui::Button::new("◀"))
                         .clicked()
                     {
                         number -= 1;
                     }
                     ui.add_enabled(
-                        !busy,
+                        true,
                         egui::DragValue::new(&mut number)
                             .range(1..=pdf.pages.len())
                             .prefix("Página "),
                     );
                     if ui
-                        .add_enabled(number < pdf.pages.len() && !busy, egui::Button::new("▶"))
+                        .add_enabled(number < pdf.pages.len(), egui::Button::new("▶"))
                         .clicked()
                     {
                         number += 1;
@@ -541,27 +667,36 @@ impl eframe::App for App {
                     self.page = (number - 1).min(pdf.pages.len() - 1);
                     ui.label(format!("/ {}", pdf.pages.len()));
                     ui.add_enabled(
-                        !busy,
-                        egui::Slider::new(&mut self.zoom, 0.25..=4.0)
+                        true,
+                        egui::Slider::new(&mut self.zoom, 0.1..=8.0)
                             .text("Zoom")
                             .fixed_decimals(2),
                     );
                 });
-                let key = (
-                    self.page,
-                    (self.zoom * 100.0).round() as u32,
-                    self.show_preview && self.preview.is_some(),
-                );
-                if self.render_key != Some(key) && self.rx.is_none() {
-                    self.render_key = Some(key);
-                    self.texture = None;
-                    let page = self.page;
-                    let scale = self.zoom * ctx.pixels_per_point();
-                    self.launch("Renderizando página…", move || {
-                        pdf.render(page, scale)
-                            .map(Done::Image)
-                            .map_err(|e| e.to_string())
+                let viewport = ui.available_rect_before_wrap();
+                let info = &pdf.pages[self.page];
+                if self.fit_page {
+                    self.zoom = ((viewport.width() - 24.0) / info.width)
+                        .min((viewport.height() - 24.0) / info.height)
+                        .clamp(0.1, 8.0);
+                    self.fit_page = false;
+                }
+                if ctx.input(|i| {
+                    i.modifiers.ctrl && i.pointer.hover_pos().is_some_and(|p| viewport.contains(p))
+                }) {
+                    let delta = ctx.input_mut(|i| {
+                        let d = i.raw_scroll_delta.y;
+                        i.raw_scroll_delta = egui::Vec2::ZERO;
+                        i.smooth_scroll_delta = egui::Vec2::ZERO;
+                        d
                     });
+                    self.zoom = numeropdf::layout::wheel_zoom(self.zoom, delta);
+                }
+                if let Some(e) =
+                    self.viewer
+                        .update(ctx, &pdf, self.page, self.zoom * ctx.pixels_per_point())
+                {
+                    self.status = e;
                 }
                 if self.choose_area {
                     ui.colored_label(
@@ -569,12 +704,36 @@ impl eframe::App for App {
                         "Arraste sobre a página para definir a área de numeração",
                     );
                 }
+                let view = (self.page, (self.zoom * 10000.0) as u32);
+                let recenter = self.previous_view != Some(view);
+                self.previous_view = Some(view);
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if let Some(texture) = &self.texture {
-                            let size = texture.size_vec2() / ctx.pixels_per_point();
-                            let response = ui.add(
+                        if let Some(texture) = self.viewer.texture() {
+                            let size = egui::vec2(info.width, info.height) * self.zoom;
+                            let canvas = size.max(viewport.size());
+                            let (rect, _) = ui.allocate_exact_size(canvas, egui::Sense::hover());
+                            let offset = egui::vec2(
+                                numeropdf::layout::centered_offset(canvas.x, size.x),
+                                numeropdf::layout::centered_offset(canvas.y, size.y),
+                            );
+                            let page_rect = egui::Rect::from_min_size(rect.min + offset, size);
+                            #[cfg(test)]
+                            {
+                                self.geometry = Some((viewport, page_rect));
+                            }
+                            if recenter {
+                                ui.scroll_to_rect(
+                                    egui::Rect::from_center_size(
+                                        page_rect.center(),
+                                        egui::vec2(1.0, 1.0),
+                                    ),
+                                    Some(egui::Align::Center),
+                                );
+                            }
+                            let response = ui.put(
+                                page_rect,
                                 egui::Image::new((texture.id(), size)).sense(egui::Sense::drag()),
                             );
                             if self.choose_area {
@@ -628,5 +787,74 @@ impl eframe::App for App {
                 });
             }
         });
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.draw(ctx);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn centered_page_and_ctrl_wheel_zoom() {
+        let mut doc = pdfcraft_cos::Document::new_empty();
+        pdfcraft_organize::insert_blank_page(&mut doc, 0, 500.0, 400.0).unwrap();
+        let pdf =
+            Pdf::from_bytes(pdfcraft_cos::write_full(&doc, &Default::default()).unwrap()).unwrap();
+        let mut app = App::initial();
+        app.document = Some(Arc::new(pdf));
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1320.0, 850.0),
+            )),
+            ..Default::default()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.geometry.is_none() {
+            let _ = ctx.run(input(), |ctx| app.draw(ctx));
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (viewport, page) = app.geometry.unwrap();
+        assert!((viewport.center() - page.center()).length() < 2.0);
+        let before = app.zoom;
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let mut raw = input();
+        raw.modifiers = ctrl;
+        raw.events = vec![
+            egui::Event::PointerMoved(viewport.center()),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 100.0),
+                modifiers: ctrl,
+            },
+        ];
+        let _ = ctx.run(raw, |ctx| app.draw(ctx));
+        assert!(app.zoom > before);
+        assert_eq!(ctx.zoom_factor(), 1.0);
+    }
+    #[test]
+    fn dropped_batch_is_deduplicated_and_queued_while_busy() {
+        let mut app = App::initial();
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        app.add_files(vec![
+            "a.pdf".into(),
+            "b.PDF".into(),
+            "bad.txt".into(),
+            "a.pdf".into(),
+        ]);
+        assert_eq!(app.files.len(), 2);
+        assert_eq!(app.pending_open, Some("a.pdf".into()));
+        app.add_files(vec![]);
+        assert_eq!(app.pending_open, Some("a.pdf".into()));
     }
 }
