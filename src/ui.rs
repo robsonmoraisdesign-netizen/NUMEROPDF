@@ -153,7 +153,7 @@ impl App {
                 self.files.push(path);
             }
         }
-        if self.document.is_none() && first.is_some() {
+        if self.pending_open.is_none() && first.is_some() {
             self.pending_open = first;
         }
     }
