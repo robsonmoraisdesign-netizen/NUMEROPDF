@@ -25,6 +25,12 @@ pub struct Area {
     pub height: f64,
 }
 impl Area {
+    pub fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.width
+            && self.x + self.width > other.x
+            && self.y < other.y + other.height
+            && self.y + self.height > other.y
+    }
     pub fn valid(self, page: &PageInfo) -> bool {
         [self.x, self.y, self.width, self.height]
             .iter()
@@ -42,7 +48,9 @@ pub struct Candidate {
     pub page: usize,
     pub area: Area,
     pub text: String,
-    pub block: Option<usize>,
+    pub text_rect: [f64; 4],
+    /// Index into editable text lines (not paragraph blocks).
+    pub line: Option<usize>,
     pub source_size: Option<f64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -68,6 +76,8 @@ pub struct Numbering {
     pub size: f64,
     pub auto_fit: bool,
     pub inherit_size: bool,
+    /// Restrict automatic replacement to the selected area.
+    pub restrict_area: bool,
     /// 0 Helvetica, 1 Times, 2 Courier.
     pub font: usize,
     pub bold: bool,
@@ -98,6 +108,7 @@ impl Default for Numbering {
             size: 14.0,
             auto_fit: true,
             inherit_size: true,
+            restrict_area: false,
             font: 0,
             bold: true,
             italic: false,
@@ -140,12 +151,20 @@ pub fn is_page_number(text: &str) -> bool {
     let Some((a, b)) = text.trim().split_once('/') else {
         return false;
     };
+    let (a, b) = (a.trim(), b.trim());
     !a.is_empty()
         && !b.is_empty()
         && a.len() <= 9
         && b.len() <= 9
         && a.bytes().all(|c| c.is_ascii_digit())
         && b.bytes().all(|c| c.is_ascii_digit())
+}
+
+fn same_number_position(a: [f64; 4], b: [f64; 4]) -> bool {
+    let intersection =
+        (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let area = ((a[2] - a[0]) * (a[3] - a[1])).min((b[2] - b[0]) * (b[3] - b[1]));
+    area > 0.0 && intersection / area > 0.5
 }
 
 pub struct Pdf {
@@ -201,6 +220,19 @@ impl Pdf {
         image::RgbaImage::from_raw(out.width, out.height, out.rgba.to_vec())
             .ok_or_else(|| err("Raster inválido"))
     }
+    /// Inspect once on import, outside the UI thread, excluding unnumbered covers.
+    pub fn numbering_range(&self) -> Result<Option<(usize, usize)>> {
+        let doc = self.document()?;
+        let mut first = None;
+        let mut last = 0;
+        for page in 0..self.pages.len() {
+            if !self.candidates_in(&doc, page)?.is_empty() {
+                first.get_or_insert(page);
+                last = page;
+            }
+        }
+        Ok(first.map(|first| (first, last)))
+    }
     pub fn candidates(&self, page: usize) -> Result<Vec<Candidate>> {
         let doc = self.document()?;
         self.candidates_in(&doc, page)
@@ -211,7 +243,7 @@ impl Pdf {
             .get(page)
             .ok_or_else(|| err("Página inexistente"))?;
         let rules = pdfcraft_edit::page_rules(doc, page).unwrap_or_default();
-        let blocks = pdfcraft_edit::text_blocks(doc, page).map_err(err)?;
+        let blocks = pdfcraft_edit::text_lines(doc, page).map_err(err)?;
         let mut result = Vec::new();
         for (index, b) in blocks.iter().enumerate() {
             if !is_page_number(&b.text) {
@@ -246,7 +278,8 @@ impl Pdf {
                     height: bottom - y,
                 },
                 text: b.text.clone(),
-                block: Some(index),
+                text_rect: b.rect,
+                line: Some(index),
                 source_size: Some(b.size),
             });
         }
@@ -269,7 +302,8 @@ impl Pdf {
                     height: area.height / 2.0,
                 },
                 text: "Marcador (revisar)".into(),
-                block: None,
+                text_rect: [0.0; 4],
+                line: None,
                 source_size: None,
             })
             .collect())
@@ -290,16 +324,37 @@ impl Pdf {
             let info = &self.pages[page];
             let mut preferred_size = config.size;
             let area = match config.mode {
-                Mode::Manual => config.area,
+                Mode::Manual => {
+                    if self
+                        .candidates_in(&doc, page)?
+                        .iter()
+                        .any(|c| c.area.overlaps(config.area))
+                    {
+                        return Err(err(format!(
+                            "Página {}: já existe contagem nessa região. Use Substituir contagem existente e, se necessário, selecione a região de busca.",
+                            page + 1
+                        )));
+                    }
+                    config.area
+                }
                 mode => {
-                    let candidates = if mode == Mode::Existing {
+                    let mut candidates = if mode == Mode::Existing {
                         self.candidates_in(&doc, page)?
                     } else {
                         self.marker_candidates(page, &config.marker_pattern)?
                     };
-                    if candidates.len() != 1 {
+                    if mode == Mode::Existing && config.restrict_area {
+                        candidates.retain(|c| c.area.overlaps(config.area));
+                    }
+                    if candidates.is_empty()
+                        || (candidates.len() != 1
+                            && (mode != Mode::Existing
+                                || !candidates.iter().all(|c| {
+                                    same_number_position(c.text_rect, candidates[0].text_rect)
+                                })))
+                    {
                         return Err(err(format!(
-                            "Página {}: {} candidatos. Defina uma área manual ou ajuste o intervalo.",
+                            "Página {}: {} candidatos. Selecione a região de busca em Substituir contagem existente ou ajuste o intervalo.",
                             page + 1,
                             candidates.len()
                         )));
@@ -308,8 +363,31 @@ impl Pdf {
                     if config.inherit_size {
                         preferred_size = c.source_size.unwrap_or(config.size);
                     }
-                    if let Some(block) = c.block {
-                        pdfcraft_edit::clear_block(&mut doc, page, block).map_err(err)?;
+                    if c.line.is_some() {
+                        // Refresh indices after every removal; copied/overlaid counts can have
+                        // distinct operators and must all disappear before adding new text.
+                        for attempt in 0..=32 {
+                            let remaining = self.candidates_in(&doc, page)?;
+                            let old = remaining
+                                .iter()
+                                .find(|old| same_number_position(old.text_rect, c.text_rect));
+                            let Some(old) = old else {
+                                break;
+                            };
+                            if attempt == 32 {
+                                return Err(err(format!(
+                                    "Página {}: não foi possível remover toda a contagem anterior",
+                                    page + 1
+                                )));
+                            }
+                            pdfcraft_edit::replace_line(
+                                &mut doc,
+                                page,
+                                old.line.ok_or_else(|| err("Contagem não editável"))?,
+                                "",
+                            )
+                            .map_err(err)?;
+                        }
                     }
                     if mode == Mode::PurpleMarker {
                         if !config.allow_marker_cover {

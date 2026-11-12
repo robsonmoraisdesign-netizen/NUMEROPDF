@@ -239,3 +239,115 @@ fn detects_cell_and_original_font_size() {
         .unwrap();
     assert_eq!(out.candidates(1).unwrap()[0].source_size, Some(14.0));
 }
+
+fn add_fixture_text(doc: &mut Document, page: usize, text: &str, rect: [f64; 4]) {
+    pdfcraft_edit::add_content(
+        doc,
+        page,
+        &Content::Text(AddedText {
+            rect,
+            text: text.into(),
+            family: Family::Helvetica,
+            bold: true,
+            italic: false,
+            size: 14.0,
+            color: [0.0; 3],
+            ink: None,
+            align: Align::Center,
+            char_spacing: 0.0,
+            aligns: vec![],
+        }),
+    )
+    .unwrap();
+}
+#[test]
+fn finds_number_inside_paragraph_without_removing_other_line() {
+    let p = fixture();
+    let mut doc = Document::open(p.bytes.clone()).unwrap();
+    add_fixture_text(&mut doc, 1, "NOTE", [780.0, 23.0, 830.0, 43.0]);
+    let blocks = pdfcraft_edit::text_blocks(&doc, 1).unwrap();
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b.text.contains("NOTE") && b.text.contains("01/02")),
+        "fixture must reproduce merged paragraph"
+    );
+    let pdf = Pdf::from_bytes(write_full(&doc, &Default::default()).unwrap()).unwrap();
+    assert_eq!(pdf.candidates(1).unwrap().len(), 1);
+    let out = pdf
+        .numbered(&Numbering {
+            first_page: 1,
+            last_page: 1,
+            start: 20,
+            ..Default::default()
+        })
+        .unwrap();
+    let doc = Document::open(out.bytes.clone()).unwrap();
+    let text: Vec<_> = pdfcraft_edit::text_lines(&doc, 1)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    assert!(text.iter().any(|t| t == "NOTE"));
+    assert!(!text.iter().any(|t| t.contains("01/02")));
+    assert_eq!(out.candidates(1).unwrap()[0].text, "20/01");
+}
+#[test]
+fn removes_previously_overlaid_counts_and_is_repeatable() {
+    let p = fixture();
+    let mut doc = Document::open(p.bytes.clone()).unwrap();
+    add_fixture_text(&mut doc, 1, "99/99", [780.0, 40.0, 830.0, 60.0]);
+    let pdf = Pdf::from_bytes(write_full(&doc, &Default::default()).unwrap()).unwrap();
+    let config = Numbering {
+        first_page: 1,
+        last_page: 1,
+        start: 20,
+        ..Default::default()
+    };
+    let out = pdf.numbered(&config).unwrap();
+    assert_eq!(out.candidates(1).unwrap().len(), 1);
+    assert_eq!(out.candidates(1).unwrap()[0].text, "20/01");
+    assert_eq!(
+        out.numbered(&config).unwrap().candidates(1).unwrap().len(),
+        1
+    );
+}
+#[test]
+fn manual_mode_refuses_overlay_and_region_replaces() {
+    let pdf = fixture();
+    let area = pdf.candidates(1).unwrap()[0].area;
+    assert!(
+        pdf.numbered(&Numbering {
+            mode: Mode::Manual,
+            area,
+            first_page: 1,
+            last_page: 1,
+            ..Default::default()
+        })
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("Substituir")
+    );
+    let out = pdf
+        .numbered(&Numbering {
+            mode: Mode::Existing,
+            area,
+            restrict_area: true,
+            first_page: 1,
+            last_page: 1,
+            start: 17,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(out.candidates(1).unwrap()[0].text, "17/01");
+}
+#[test]
+fn detects_range_after_two_unnumbered_pages() {
+    let p = fixture();
+    let doc = p.extract(&[0, 0, 1, 2]).unwrap();
+    assert_eq!(doc.numbering_range().unwrap(), Some((2, 3)));
+    assert_eq!(p.extract(&[0]).unwrap().numbering_range().unwrap(), None);
+    assert!(numeropdf::is_page_number(" 01 / 12 "));
+    assert!(!numeropdf::is_page_number("12/11/2026"));
+}

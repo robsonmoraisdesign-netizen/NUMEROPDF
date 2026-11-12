@@ -7,12 +7,39 @@ use std::{
 
 enum Done {
     Document(Arc<Pdf>, String),
+    Opened(Arc<Pdf>, String, Option<(usize, usize)>),
+    Saved(String, bool),
     Preview(Arc<Pdf>),
     Batch(Vec<numeropdf::batch::Outcome>),
     Message(String),
 }
 type Work = std::result::Result<Done, String>;
+struct DocumentTab {
+    path: std::path::PathBuf,
+    state: Option<DocumentState>,
+}
+struct DocumentState {
+    document: Option<Arc<Pdf>>,
+    preview: Option<Arc<Pdf>>,
+    undo: Option<Arc<Pdf>>,
+    config: Numbering,
+    page: usize,
+    zoom: f32,
+    dpi: u32,
+    viewer: crate::viewer::Viewer,
+    fit_page: bool,
+    previous_view: Option<(usize, u32)>,
+    name: String,
+    show_preview: bool,
+    choose_area: bool,
+    drag_start: Option<egui::Pos2>,
+    dirty: bool,
+}
 pub struct App {
+    tabs: Vec<DocumentTab>,
+    active_tab: Option<usize>,
+    close_requested: Option<usize>,
+    dirty: bool,
     document: Option<Arc<Pdf>>,
     preview: Option<Arc<Pdf>>,
     undo: Option<Arc<Pdf>>,
@@ -44,6 +71,10 @@ impl App {
     }
     fn initial() -> Self {
         Self {
+            tabs: Vec::new(),
+            active_tab: None,
+            close_requested: None,
+            dirty: false,
             document: None,
             preview: None,
             undo: None,
@@ -67,6 +98,175 @@ impl App {
             show_preview: true,
             choose_area: false,
             drag_start: None,
+        }
+    }
+    fn take_state(&mut self) -> DocumentState {
+        DocumentState {
+            document: std::mem::take(&mut self.document),
+            preview: std::mem::take(&mut self.preview),
+            undo: std::mem::take(&mut self.undo),
+            page: std::mem::take(&mut self.page),
+            zoom: std::mem::take(&mut self.zoom),
+            dpi: std::mem::take(&mut self.dpi),
+            viewer: std::mem::take(&mut self.viewer),
+            fit_page: std::mem::take(&mut self.fit_page),
+            previous_view: std::mem::take(&mut self.previous_view),
+            name: std::mem::take(&mut self.name),
+            show_preview: std::mem::take(&mut self.show_preview),
+            choose_area: std::mem::take(&mut self.choose_area),
+            drag_start: std::mem::take(&mut self.drag_start),
+            config: std::mem::take(&mut self.config),
+            dirty: std::mem::take(&mut self.dirty),
+        }
+    }
+    fn restore_state(&mut self, state: DocumentState) {
+        self.document = state.document;
+        self.preview = state.preview;
+        self.undo = state.undo;
+        self.config = state.config;
+        self.page = state.page;
+        self.zoom = state.zoom;
+        self.dpi = state.dpi;
+        self.viewer = state.viewer;
+        self.fit_page = state.fit_page;
+        self.previous_view = state.previous_view;
+        self.name = state.name;
+        self.show_preview = state.show_preview;
+        self.choose_area = state.choose_area;
+        self.drag_start = state.drag_start;
+        self.dirty = state.dirty;
+    }
+    fn activate_tab(&mut self, index: usize) {
+        if self.rx.is_some() || self.active_tab == Some(index) || index >= self.tabs.len() {
+            return;
+        }
+        if let Some(old) = self.active_tab {
+            // Inactive tabs keep the PDF and edits, but release render workers and raster caches.
+            self.viewer = Default::default();
+            let state = self.take_state();
+            self.tabs[old].state = Some(state);
+        }
+        self.active_tab = Some(index);
+        if let Some(state) = self.tabs[index].state.take() {
+            self.restore_state(state);
+        } else {
+            let fresh = Self::initial().take_state();
+            self.restore_state(fresh);
+            self.name = self.tabs[index]
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+        }
+        self.choose_area = false;
+        self.drag_start = None;
+    }
+    fn close_tab(&mut self, index: usize) {
+        if self.rx.is_some() || index >= self.tabs.len() {
+            return;
+        }
+        let path = self.tabs[index].path.clone();
+        self.files.retain(|p| p != &path);
+        if self.pending_open.as_ref() == Some(&path) {
+            self.pending_open = None;
+        }
+        if self.active_tab == Some(index) {
+            self.take_state();
+            self.active_tab = None;
+            self.tabs.remove(index);
+            if !self.tabs.is_empty() {
+                self.pending_open = Some(self.tabs[index.min(self.tabs.len() - 1)].path.clone());
+            } else {
+                let fresh = Self::initial().take_state();
+                self.restore_state(fresh);
+                self.status = "Nenhum PDF aberto. Arraste arquivos para começar.".into();
+            }
+        } else {
+            self.tabs.remove(index);
+            if let Some(active) = self.active_tab.as_mut()
+                && *active > index
+            {
+                *active -= 1;
+            }
+        }
+        self.close_requested = None;
+    }
+    fn tab_bar(&mut self, ctx: &egui::Context) {
+        let mut select = None;
+        let mut close = None;
+        egui::TopBottomPanel::top("document-tabs").show(ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(self.rx.is_none() && self.close_requested.is_none(), |ui| {
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let dirty = if self.active_tab == Some(index) {
+                                self.dirty
+                            } else {
+                                tab.state.as_ref().is_some_and(|s| s.dirty)
+                            };
+                            let label = format!(
+                                "{}{}",
+                                tab.path.file_name().unwrap_or_default().to_string_lossy(),
+                                if dirty { " *" } else { "" }
+                            );
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(self.active_tab == Some(index), label)
+                                        .on_hover_text(tab.path.display().to_string())
+                                        .clicked()
+                                    {
+                                        select = Some(index);
+                                    }
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Fechar este documento")
+                                        .clicked()
+                                    {
+                                        close = Some(index);
+                                    }
+                                });
+                            });
+                        }
+                    });
+                    if self.tabs.is_empty() {
+                        ui.weak("Nenhum documento aberto");
+                    }
+                });
+            });
+        });
+        if let Some(index) = select {
+            self.pending_open = Some(self.tabs[index].path.clone());
+        }
+        if let Some(index) = close {
+            let dirty = if self.active_tab == Some(index) {
+                self.dirty
+            } else {
+                self.tabs[index].state.as_ref().is_some_and(|s| s.dirty)
+            };
+            if dirty {
+                self.close_requested = Some(index);
+            } else {
+                self.close_tab(index);
+            }
+        }
+        if let Some(index) = self.close_requested {
+            egui::Window::new("Fechar documento?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Este documento tem alterações ainda não salvas em uma cópia.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Continuar editando").clicked() {
+                            self.close_requested = None;
+                        }
+                        if ui.button("Fechar e descartar prévia").clicked() {
+                            self.close_tab(index);
+                        }
+                    });
+                });
         }
     }
     fn launch(&mut self, label: &str, work: impl FnOnce() -> Work + Send + 'static) {
@@ -103,7 +303,34 @@ impl App {
         if let Some(result) = result {
             self.rx = None;
             match result {
+                Ok(Done::Opened(doc, name, range)) => {
+                    self.config.last_page = range.map_or(doc.pages.len() - 1, |r| r.1);
+                    self.config.first_page = range.map_or(0, |r| r.0);
+                    self.document = Some(doc);
+                    self.name = name;
+                    self.page = self.config.first_page;
+                    self.preview = None;
+                    self.undo = None;
+                    self.dirty = false;
+                    self.fit_page = true;
+                    self.status = if let Some((first, last)) = range {
+                        format!(
+                            "Contagem detectada nas folhas {} a {}. Revise o intervalo e gere a prévia.",
+                            first + 1,
+                            last + 1
+                        )
+                    } else {
+                        "Nenhuma contagem editável detectada. Selecione o modo apropriado.".into()
+                    };
+                }
+                Ok(Done::Saved(message, saved_changes)) => {
+                    if saved_changes {
+                        self.dirty = false;
+                    }
+                    self.status = message;
+                }
                 Ok(Done::Document(doc, name)) => {
+                    self.dirty = true;
                     self.undo = self.document.take();
                     self.config.last_page = doc.pages.len() - 1;
                     self.config.first_page = usize::from(doc.pages.len() > 1);
@@ -117,6 +344,7 @@ impl App {
                         "PDF aberto. Configure a numeração ou organize as páginas.".into();
                 }
                 Ok(Done::Preview(pdf)) => {
+                    self.dirty = true;
                     self.preview = Some(pdf);
                     self.show_preview = true;
 
@@ -146,11 +374,17 @@ impl App {
             {
                 continue;
             }
+            if !self.tabs.iter().any(|tab| tab.path == path) && self.tabs.len() < 1000 {
+                self.tabs.push(DocumentTab {
+                    path: path.clone(),
+                    state: None,
+                });
+            }
             if first.is_none() {
                 first = Some(path.clone());
             }
             if !self.files.contains(&path) && self.files.len() < 1000 {
-                self.files.push(path);
+                self.files.push(path.clone());
             }
         }
         if self.pending_open.is_none() && first.is_some() {
@@ -158,15 +392,29 @@ impl App {
         }
     }
     fn open_path(&mut self, path: std::path::PathBuf) {
+        let index = if let Some(index) = self.tabs.iter().position(|t| t.path == path) {
+            index
+        } else {
+            self.tabs.push(DocumentTab {
+                path: path.clone(),
+                state: None,
+            });
+            self.tabs.len() - 1
+        };
+        self.activate_tab(index);
+        if self.document.is_some() {
+            return;
+        }
+
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
         self.launch("Abrindo PDF…", move || {
-            Pdf::open(&path)
-                .map(|p| Done::Document(Arc::new(p), name))
-                .map_err(|e| e.to_string())
+            let pdf = Pdf::open(&path).map_err(|e| e.to_string())?;
+            let range = pdf.numbering_range().map_err(|e| e.to_string())?;
+            Ok(Done::Opened(Arc::new(pdf), name, range))
         });
     }
     fn open(&mut self) {
@@ -260,9 +508,18 @@ impl App {
                 .set_file_name("numeropdf-exportado.pdf")
                 .save_file()
         {
+            let saved_changes = self
+                .preview
+                .as_ref()
+                .is_none_or(|p| Arc::ptr_eq(&p.bytes, &pdf.bytes));
             self.launch("Salvando cópia…", move || {
                 pdf.save(&path)
-                    .map(|_| Done::Message("Cópia salva. Arquivo original preservado.".into()))
+                    .map(|_| {
+                        Done::Saved(
+                            "Cópia salva. Arquivo original preservado.".into(),
+                            saved_changes,
+                        )
+                    })
                     .map_err(|e| e.to_string())
             });
         }
@@ -447,6 +704,18 @@ impl App {
                 "Cobrir marcador de branco (permanece por baixo)",
             );
         }
+        if self.config.mode == Mode::Existing {
+            ui.checkbox(
+                &mut self.config.restrict_area,
+                "Buscar somente na região selecionada",
+            );
+            if ui.button("Selecionar região da contagem").clicked() {
+                self.config.restrict_area = true;
+                self.choose_area = true;
+                self.show_preview = false;
+            }
+            ui.label("Remove o texto anterior antes de inserir a nova contagem.");
+        }
         if self.config.mode == Mode::Manual {
             if ui.button("Desenhar área na página").clicked() {
                 self.choose_area = true;
@@ -564,12 +833,13 @@ impl App {
         });
         self.add_files(dropped);
         if self.rx.is_none()
+            && self.close_requested.is_none()
             && let Some(path) = self.pending_open.take()
         {
             self.open_path(path);
         }
 
-        let busy = self.rx.is_some();
+        let busy = self.rx.is_some() || self.close_requested.is_some();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("NUMERO").strong().size(23.0));
@@ -623,6 +893,7 @@ impl App {
                 });
             });
         });
+        self.tab_bar(ctx);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.rx.is_some() {
@@ -840,6 +1111,52 @@ mod tests {
         let _ = ctx.run(raw, |ctx| app.draw(ctx));
         assert!(app.zoom > before);
         assert_eq!(ctx.zoom_factor(), 1.0);
+    }
+    #[test]
+    fn document_tabs_preserve_settings_and_close_independently() {
+        let mut app = App::initial();
+        app.add_files(vec!["a.pdf".into(), "b.pdf".into()]);
+        assert_eq!(app.tabs.len(), 2);
+        app.pending_open = None;
+        app.activate_tab(0);
+        app.config.start = 42;
+        app.page = 3;
+        app.zoom = 2.0;
+        app.dirty = true;
+        app.activate_tab(1);
+        assert_eq!(app.config.start, 1);
+        assert_eq!(app.zoom, 1.0);
+        app.config.start = 7;
+        app.activate_tab(0);
+        assert_eq!(app.config.start, 42);
+        assert_eq!(app.page, 3);
+        assert_eq!(app.zoom, 2.0);
+        assert!(app.dirty);
+        app.close_tab(1);
+        assert_eq!(app.active_tab, Some(0));
+        assert_eq!(app.config.start, 42);
+        app.close_tab(0);
+        assert!(app.tabs.is_empty());
+        assert!(app.document.is_none());
+        assert!(app.files.is_empty());
+        assert_eq!(app.zoom, 1.0);
+        app.add_files(vec!["c.pdf".into()]);
+        app.activate_tab(0);
+        assert_eq!(app.config.start, 1);
+    }
+    #[test]
+    fn closing_first_background_tab_keeps_active_index_and_worker_guard() {
+        let mut app = App::initial();
+        app.add_files(vec!["a.pdf".into(), "b.pdf".into()]);
+        app.activate_tab(1);
+        app.config.start = 50;
+        app.close_tab(0);
+        assert_eq!(app.active_tab, Some(0));
+        assert_eq!(app.config.start, 50);
+        let (_tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        app.close_tab(0);
+        assert_eq!(app.tabs.len(), 1);
     }
     #[test]
     fn dropped_batch_is_deduplicated_and_queued_while_busy() {

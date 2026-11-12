@@ -47,3 +47,12 @@ Interface em uma sessão desktop real; executável no Windows; documentos extern
 - Lote usa apenas um documento por vez e continua após falhas; todos os arquivos de saída usam gravação sem sobrescrita.
 - `cargo test --locked`, `cargo fmt --check` e Clippy do projeto com avisos tratados como erro. Uma advertência de importação não utilizada permanece no fornecedor hayro-interpret, não modificado.
 - Ainda é necessária validação interativa no Windows, especialmente arrastar arquivos do Explorer e uso com telas de DPI diferentes. Não há medição de velocidade em máquina do usuário.
+
+
+## Versão 0.3 — regressão da contagem e múltiplos documentos
+
+28 testes automatizados passaram. Os novos casos cobrem contagem dentro de um parágrafo com outra linha (que deve ser preservada), remoção de dois números sobrepostos, renumeração repetida sem acumular texto, bloqueio de sobreposição manual, seleção de região, duas capas e estado independente das abas ao alternar/fechar.
+
+Validação privada de um documento de 23 páginas: 21 folhas renumeradas com uma única contagem editável em cada folha e duas páginas iniciais intactas. Comparação independente por PyMuPDF não encontrou diferenças de pixels fora da célula da numeração. A página antes não detectada foi renderizada em ampliação para revisão visual. Nenhum PDF de cliente faz parte do repositório.
+
+Testes da interface usam egui sem janela. A interação manual em Windows ainda não foi verificada nesta versão.

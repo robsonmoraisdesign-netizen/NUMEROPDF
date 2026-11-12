@@ -2,7 +2,7 @@
 
 Aplicação desktop em Rust para organizar PDFs e numerar pranchas. Interface nativa egui; operações PDF e renderização por módulos do [PDFCraft](https://github.com/storytold/pdfcraft), fixados em um submódulo. Sem JavaScript, Electron, Tauri ou serviços remotos de processamento.
 
-**Estado: alpha 0.2.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
+**Estado: alpha 0.3.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
 
 ## Implementado
 
@@ -86,3 +86,13 @@ Abra ou solte vários PDFs sobre a janela. No painel **Lote**, selecione o docum
 Segure **Ctrl** e gire a roda sobre a página para aproximar ou afastar. A página fica centralizada quando cabe na área disponível; com zoom maior, as barras permitem examinar toda a folha. Ao mudar zoom, a visualização volta ao centro.
 
 Em **Substituir contagem existente**, o tamanho original é detectado por padrão e ajustado para caber. Desmarque **Detectar tamanho da fonte existente** para usar o tamanho manual. A detecção automática desta versão reconhece texto editável no formato `01/06`; não inclui OCR de contagens em imagens. Candidatos ausentes ou ambíguos geram erro para revisão.
+
+## Versão 0.3 — substituição verificada e abas
+
+- Cada arquivo aberto aparece em uma aba com **×**. Trocar de aba mantém página, zoom, configuração e prévia daquele documento. Fechar a última aba mantém o aplicativo aberto. Há aviso antes de descartar alterações não salvas; troca e fechamento aguardam a operação em andamento terminar.
+- Os documentos são carregados ao selecionar suas abas. Ao sair de uma aba, o cache de renderização e o trabalhador são liberados para limitar o consumo de memória e threads.
+- A detecção usa linhas de texto editáveis, incluindo contagens agrupadas com outros textos em um parágrafo e espaços em `01 / 12`. Datas não são consideradas contagem.
+- Ao abrir, o programa sugere o intervalo entre a primeira e a última folha com contagem, preservando capas sem número. Revise o intervalo: uma folha sem contagem no meio continua gerando erro, sem substituição parcial.
+- **Substituir contagem existente** remove as linhas antigas, relê a região e só então insere o novo texto. Contagens previamente sobrepostas na mesma posição também são removidas. Regiões distintas continuam exigindo escolha do usuário.
+- **Selecionar região da contagem** restringe a busca sem mudar para o modo de nova numeração. O modo manual recusa adicionar um número sobre uma contagem detectada e orienta usar substituição.
+- OCR de imagens, texto convertido em curvas e edição de texto dentro de Form XObjects não estão implementados. A verificação cobre os textos editáveis reconhecidos; a prévia deve ser conferida antes de salvar.
