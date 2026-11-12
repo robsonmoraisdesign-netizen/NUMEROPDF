@@ -5,9 +5,11 @@ use std::{
     time::Duration,
 };
 
+type ImportResult = Result<(Arc<Pdf>, Option<(usize, usize)>), String>;
 enum Done {
     Document(Arc<Pdf>, String),
-    Opened(Arc<Pdf>, String, Option<(usize, usize)>),
+    Imported(u64, ImportResult),
+    Numbered(Vec<numeropdf::batch::Generated>),
     Saved(String, bool),
     Preview(Arc<Pdf>),
     Batch(Vec<numeropdf::batch::Outcome>),
@@ -15,6 +17,9 @@ enum Done {
 }
 type Work = std::result::Result<Done, String>;
 struct DocumentTab {
+    id: u64,
+    analyzed: bool,
+    error: Option<String>,
     path: std::path::PathBuf,
     state: Option<DocumentState>,
 }
@@ -36,6 +41,10 @@ struct DocumentState {
     dirty: bool,
 }
 pub struct App {
+    import_queue: std::collections::VecDeque<(u64, std::path::PathBuf)>,
+    next_id: u64,
+    output_dir: Option<std::path::PathBuf>,
+    batch_shared_settings: bool,
     tabs: Vec<DocumentTab>,
     active_tab: Option<usize>,
     close_requested: Option<usize>,
@@ -71,6 +80,10 @@ impl App {
     }
     fn initial() -> Self {
         Self {
+            import_queue: Default::default(),
+            next_id: 0,
+            output_dir: None,
+            batch_shared_settings: true,
             tabs: Vec::new(),
             active_tab: None,
             close_requested: None,
@@ -303,25 +316,68 @@ impl App {
         if let Some(result) = result {
             self.rx = None;
             match result {
-                Ok(Done::Opened(doc, name, range)) => {
-                    self.config.last_page = range.map_or(doc.pages.len() - 1, |r| r.1);
-                    self.config.first_page = range.map_or(0, |r| r.0);
-                    self.document = Some(doc);
-                    self.name = name;
-                    self.page = self.config.first_page;
-                    self.preview = None;
-                    self.undo = None;
-                    self.dirty = false;
-                    self.fit_page = true;
-                    self.status = if let Some((first, last)) = range {
-                        format!(
-                            "Contagem detectada nas folhas {} a {}. Revise o intervalo e gere a prévia.",
-                            first + 1,
-                            last + 1
-                        )
-                    } else {
-                        "Nenhuma contagem editável detectada. Selecione o modo apropriado.".into()
-                    };
+                Ok(Done::Imported(id, result)) => {
+                    if let Some(index) = self.tabs.iter().position(|t| t.id == id) {
+                        self.tabs[index].analyzed = true;
+                        match result {
+                            Ok((doc, range)) => {
+                                let mut state = Self::initial().take_state();
+                                state.config.first_page = range.map_or(0, |r| r.0);
+                                state.config.last_page = range.map_or(doc.pages.len() - 1, |r| r.1);
+                                state.page = state.config.first_page;
+                                state.name = self.tabs[index]
+                                    .path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned();
+                                state.document = Some(doc);
+                                if self.active_tab == Some(index) {
+                                    self.restore_state(state);
+                                } else {
+                                    self.tabs[index].state = Some(state);
+                                }
+                                self.tabs[index].error = None;
+                            }
+                            Err(error) => {
+                                self.tabs[index].error = Some(error);
+                            }
+                        }
+                        self.status = format!(
+                            "Leitura: {} de {} arquivos analisados",
+                            self.tabs.iter().filter(|t| t.analyzed).count(),
+                            self.tabs.len()
+                        );
+                    }
+                }
+                Ok(Done::Numbered(results)) => {
+                    let mut ok = 0;
+                    for result in results {
+                        if let Some(index) = self.tabs.iter().position(|t| t.path == result.input) {
+                            let (preview, error) = match result.result {
+                                Ok(pdf) => {
+                                    ok += 1;
+                                    (Some(pdf), None)
+                                }
+                                Err(e) => (None, Some(e)),
+                            };
+                            self.tabs[index].error = error;
+                            if self.active_tab == Some(index) {
+                                self.preview = preview;
+                                self.config = result.config;
+                                self.show_preview = true;
+                                self.dirty = self.preview.is_some() || self.undo.is_some();
+                            } else if let Some(state) = self.tabs[index].state.as_mut() {
+                                state.preview = preview;
+                                state.config = result.config;
+                                state.show_preview = true;
+                                state.dirty = state.preview.is_some() || state.undo.is_some();
+                            }
+                        }
+                    }
+                    self.status = format!(
+                        "Numeração gerada em {ok} documentos. Confira as abas e exporte o lote."
+                    );
                 }
                 Ok(Done::Saved(message, saved_changes)) => {
                     if saved_changes {
@@ -344,6 +400,9 @@ impl App {
                         "PDF aberto. Configure a numeração ou organize as páginas.".into();
                 }
                 Ok(Done::Preview(pdf)) => {
+                    if let Some(index) = self.active_tab {
+                        self.tabs[index].error = None;
+                    }
                     self.dirty = true;
                     self.preview = Some(pdf);
                     self.show_preview = true;
@@ -351,6 +410,18 @@ impl App {
                     self.status = "Prévia pronta. Confira as páginas e salve uma cópia.".into();
                 }
                 Ok(Done::Batch(results)) => {
+                    for result in &results {
+                        if result.output.is_some()
+                            && let Some(index) =
+                                self.tabs.iter().position(|t| t.path == result.input)
+                        {
+                            if self.active_tab == Some(index) {
+                                self.dirty = false;
+                            } else if let Some(state) = self.tabs[index].state.as_mut() {
+                                state.dirty = false;
+                            }
+                        }
+                    }
                     let ok = results.iter().filter(|r| r.output.is_some()).count();
                     self.status = format!("Lote concluído: {ok}/{} arquivos salvos", results.len());
                     self.results = results;
@@ -375,10 +446,15 @@ impl App {
                 continue;
             }
             if !self.tabs.iter().any(|tab| tab.path == path) && self.tabs.len() < 1000 {
+                self.next_id += 1;
                 self.tabs.push(DocumentTab {
+                    id: self.next_id,
+                    analyzed: false,
+                    error: None,
                     path: path.clone(),
                     state: None,
                 });
+                self.import_queue.push_back((self.next_id, path.clone()));
             }
             if first.is_none() {
                 first = Some(path.clone());
@@ -392,30 +468,139 @@ impl App {
         }
     }
     fn open_path(&mut self, path: std::path::PathBuf) {
-        let index = if let Some(index) = self.tabs.iter().position(|t| t.path == path) {
-            index
-        } else {
-            self.tabs.push(DocumentTab {
-                path: path.clone(),
-                state: None,
-            });
-            self.tabs.len() - 1
-        };
-        self.activate_tab(index);
-        if self.document.is_some() {
+        if !self.tabs.iter().any(|t| t.path == path) {
+            self.add_files(vec![path.clone()]);
+        }
+        if let Some(index) = self.tabs.iter().position(|t| t.path == path) {
+            self.activate_tab(index);
+        }
+    }
+    fn start_next_import(&mut self) {
+        if self.rx.is_some() || self.close_requested.is_some() {
             return;
         }
-
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        self.launch("Abrindo PDF…", move || {
-            let pdf = Pdf::open(&path).map_err(|e| e.to_string())?;
-            let range = pdf.numbering_range().map_err(|e| e.to_string())?;
-            Ok(Done::Opened(Arc::new(pdf), name, range))
-        });
+        while let Some((id, path)) = self.import_queue.pop_front() {
+            if !self.tabs.iter().any(|t| t.id == id) {
+                continue;
+            }
+            self.launch("Lendo e detectando contagens…", move || {
+                let result = std::panic::catch_unwind(|| {
+                    let pdf = Pdf::open(&path).map_err(|e| e.to_string())?;
+                    let range = pdf.numbering_range().map_err(|e| e.to_string())?;
+                    Ok((Arc::new(pdf), range))
+                })
+                .unwrap_or_else(|_| Err("Falha ao analisar este PDF".into()));
+                Ok(Done::Imported(id, result))
+            });
+            break;
+        }
+    }
+    fn ready_for_batch(&self) -> bool {
+        self.rx.is_none() && !self.tabs.is_empty() && self.tabs.iter().all(|t| t.analyzed)
+    }
+    fn numbering_inputs(&self) -> Vec<numeropdf::batch::NumberInput> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                let (document, config) = if self.active_tab == Some(index) {
+                    (self.document.as_ref(), &self.config)
+                } else {
+                    let state = tab.state.as_ref()?;
+                    (state.document.as_ref(), &state.config)
+                };
+                let mut target = if self.batch_shared_settings {
+                    self.config.clone()
+                } else {
+                    config.clone()
+                };
+                if self.batch_to_end {
+                    target.first_page = config.first_page;
+                    target.last_page = config.last_page;
+                }
+                Some(numeropdf::batch::NumberInput {
+                    input: tab.path.clone(),
+                    pdf: document?.clone(),
+                    config: target,
+                })
+            })
+            .collect()
+    }
+    fn generate_batch(&mut self) {
+        if !self.ready_for_batch() {
+            return;
+        }
+        let inputs = self.numbering_inputs();
+        if inputs.is_empty() {
+            self.status = "Nenhum PDF válido para numerar".into();
+            return;
+        }
+        for input in &inputs {
+            if let Some(index) = self.tabs.iter().position(|t| t.path == input.input) {
+                self.tabs[index].error = Some("Numeração ainda não concluída".into());
+                if self.active_tab == Some(index) {
+                    self.preview = None;
+                } else if let Some(state) = self.tabs[index].state.as_mut() {
+                    state.preview = None;
+                }
+            }
+        }
+        let progress = self.progress.clone();
+        progress.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.results.clear();
+        self.launch("Gerando numeração de todos os PDFs…", move || {
+            Ok(Done::Numbered(numeropdf::batch::generate_all(
+                inputs,
+                |done, _| {
+                    progress.store(done, std::sync::atomic::Ordering::Relaxed);
+                },
+            )))
+        })
+    }
+    fn export_inputs(&self) -> Vec<numeropdf::batch::ExportInput> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let pdf = if self.active_tab == Some(index) {
+                    self.preview.clone().or_else(|| self.document.clone())
+                } else {
+                    tab.state
+                        .as_ref()
+                        .and_then(|s| s.preview.clone().or_else(|| s.document.clone()))
+                };
+                let result = if let Some(error) = &tab.error {
+                    Err(error.clone())
+                } else {
+                    pdf.ok_or_else(|| "PDF não foi carregado".into())
+                };
+                numeropdf::batch::ExportInput {
+                    input: tab.path.clone(),
+                    result,
+                }
+            })
+            .collect()
+    }
+    fn export_batch(&mut self) {
+        if !self.ready_for_batch() {
+            return;
+        }
+        let Some(directory) = self.output_dir.clone() else {
+            return;
+        };
+        let inputs = self.export_inputs();
+        let progress = self.progress.clone();
+        progress.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.results.clear();
+        self.launch("Exportando PDFs individualmente…", move || {
+            Ok(Done::Batch(numeropdf::batch::export_all(
+                inputs,
+                &directory,
+                |done, _| {
+                    progress.store(done, std::sync::atomic::Ordering::Relaxed);
+                },
+            )))
+        })
     }
     fn open(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
@@ -427,77 +612,31 @@ impl App {
         }
     }
     fn batch_controls(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing(format!("Lote · {} PDFs", self.files.len()), |ui| {
-            if ui.button("Adicionar PDFs").clicked() {
-                self.open();
-            }
-            let mut remove = None;
-            egui::ScrollArea::vertical()
-                .id_salt("batch-files")
-                .max_height(180.0)
-                .show_rows(ui, 24.0, self.files.len(), |ui, range| {
-                    for i in range {
-                        ui.horizontal(|ui| {
-                            if ui.small_button("×").clicked() {
-                                remove = Some(i);
-                            }
-                            if ui
-                                .selectable_label(
-                                    false,
-                                    self.files[i]
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy(),
-                                )
-                                .clicked()
-                            {
-                                self.pending_open = Some(self.files[i].clone());
-                            }
-                        });
-                    }
-                });
-            if let Some(i) = remove {
-                self.files.remove(i);
-            }
-            ui.checkbox(
-                &mut self.batch_to_end,
-                "Até a última folha de cada documento",
-            );
-            ui.label("A sequência reinicia em cada PDF. Originais preservados.");
-            if ui
-                .add_enabled(
-                    self.rx.is_none() && !self.files.is_empty(),
-                    egui::Button::new("Numerar lote e salvar…"),
-                )
-                .clicked()
-                && let Some(dir) = rfd::FileDialog::new().pick_folder()
-            {
-                let inputs = self.files.clone();
-                let config = self.config.clone();
-                let to_end = self.batch_to_end;
-                let progress = self.progress.clone();
-                progress.store(0, std::sync::atomic::Ordering::Relaxed);
-                self.results.clear();
-                self.launch("Numerando lote…", move || {
-                    Ok(Done::Batch(numeropdf::batch::number_files(
-                        &inputs,
-                        &dir,
-                        &config,
-                        to_end,
-                        |done, _| {
-                            progress.store(done, std::sync::atomic::Ordering::Relaxed);
-                        },
-                    )))
-                })
-            }
-            ui.label(format!(
-                "Processados: {}",
-                self.progress.load(std::sync::atomic::Ordering::Relaxed)
-            ));
-            for result in &self.results {
-                if let Some(e) = &result.error {
-                    ui.colored_label(Color32::YELLOW, format!("{}: {e}", result.input.display()));
+        egui::CollapsingHeader::new(format!("Lote · {} PDFs",self.tabs.len())).default_open(true).show(ui,|ui|{
+            if ui.button("Adicionar PDFs").clicked(){self.open();}
+            let analyzed=self.tabs.iter().filter(|t|t.analyzed).count();
+            ui.label(format!("Leitura automática: {analyzed}/{}",self.tabs.len()));
+            egui::ScrollArea::vertical().id_salt("batch-files").max_height(170.0).show_rows(ui,24.0,self.tabs.len(),|ui,range|{
+                for index in range {
+                    let tab=&self.tabs[index];
+                    let state=tab.state.as_ref();
+                    let pages=if self.active_tab==Some(index){self.document.as_ref().map(|p|p.pages.len())}else{state.and_then(|s|s.document.as_ref().map(|p|p.pages.len()))};
+                    let suffix=if tab.error.is_some(){"Erro".into()}else if !tab.analyzed{"Aguardando leitura".into()}else{format!("{} páginas",pages.unwrap_or(0))};
+                    if ui.selectable_label(self.active_tab==Some(index),format!("{} · {suffix}",tab.path.file_name().unwrap_or_default().to_string_lossy())).on_hover_text(tab.error.as_deref().unwrap_or("Selecionar documento")).clicked(){self.pending_open=Some(tab.path.clone());}
                 }
+            });
+            ui.checkbox(&mut self.batch_shared_settings,"Usar estilo e número inicial da aba atual em todos");
+            ui.checkbox(&mut self.batch_to_end,"Respeitar o intervalo de cada documento");
+            ui.label("A sequência reinicia em cada PDF. Revise os intervalos nas abas.");
+            if ui.add_enabled(self.ready_for_batch(),egui::Button::new("Gerar numeração de todos")).clicked(){self.generate_batch();}
+            ui.separator();
+            if ui.button("Escolher pasta de exportação…").clicked() && let Some(path)=rfd::FileDialog::new().pick_folder(){self.output_dir=Some(path);}
+            if let Some(path)=&self.output_dir{ui.label(path.display().to_string());}else{ui.weak("Selecione a pasta de destino");}
+            ui.label("Um PDF por documento, com o nome original. Exporta a prévia numerada quando disponível.");
+            if ui.add_enabled(self.ready_for_batch()&&self.output_dir.is_some(),egui::Button::new("Exportar todos os PDFs")).clicked(){self.export_batch();}
+            ui.label(format!("Processados: {}",self.progress.load(std::sync::atomic::Ordering::Relaxed)));
+            for result in &self.results {
+                if let Some(error)=&result.error{ui.colored_label(Color32::YELLOW,format!("{}: {error}",result.input.file_name().unwrap_or_default().to_string_lossy()));}
             }
         });
     }
@@ -505,7 +644,12 @@ impl App {
         if let Some(pdf) = self.visible()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("PDF", &["pdf"])
-                .set_file_name("numeropdf-exportado.pdf")
+                .set_file_name(
+                    self.active_tab
+                        .and_then(|i| self.tabs[i].path.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "documento.pdf".into()),
+                )
                 .save_file()
         {
             let saved_changes = self
@@ -839,6 +983,7 @@ impl App {
             self.open_path(path);
         }
 
+        self.start_next_import();
         let busy = self.rx.is_some() || self.close_requested.is_some();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1157,6 +1302,115 @@ mod tests {
         app.rx = Some(rx);
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1);
+    }
+    fn imported_fixture(covers: usize) -> Pdf {
+        let mut doc = pdfcraft_cos::Document::new_empty();
+        for page in 0..=covers {
+            pdfcraft_organize::insert_blank_page(&mut doc, page, 300.0, 200.0).unwrap();
+        }
+        let pdf =
+            Pdf::from_bytes(pdfcraft_cos::write_full(&doc, &Default::default()).unwrap()).unwrap();
+        pdf.numbered(&Numbering {
+            mode: Mode::Manual,
+            first_page: covers,
+            last_page: covers,
+            area: Area {
+                x: 220.0,
+                y: 160.0,
+                width: 60.0,
+                height: 30.0,
+            },
+            ..Default::default()
+        })
+        .unwrap()
+    }
+    fn finish_jobs(app: &mut App) {
+        let ctx = egui::Context::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            app.poll(&ctx);
+            app.start_next_import();
+            if app.rx.is_none() && app.import_queue.is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn import_analyzes_every_tab_then_numbers_and_exports_all() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let a = source.path().join("a.pdf");
+        let b = source.path().join("b.pdf");
+        let bad = source.path().join("bad.pdf");
+        imported_fixture(1).save(&a).unwrap();
+        imported_fixture(2).save(&b).unwrap();
+        std::fs::write(&bad, b"invalid").unwrap();
+        let mut app = App::initial();
+        app.add_files(vec![a.clone(), bad, b.clone()]);
+        app.pending_open = None;
+        app.activate_tab(0);
+        finish_jobs(&mut app);
+        assert!(app.tabs.iter().all(|t| t.analyzed));
+        assert!(app.tabs[1].error.is_some());
+        assert_eq!(app.tabs[2].state.as_ref().unwrap().config.first_page, 2);
+        assert_eq!(app.active_tab, Some(0)); // second valid PDF was never selected.
+        app.config.start = 15;
+        app.generate_batch();
+        finish_jobs(&mut app);
+        assert_eq!(
+            app.preview.as_ref().unwrap().candidates(1).unwrap()[0].text,
+            "15/01"
+        );
+        assert_eq!(
+            app.tabs[2]
+                .state
+                .as_ref()
+                .unwrap()
+                .preview
+                .as_ref()
+                .unwrap()
+                .candidates(2)
+                .unwrap()[0]
+                .text,
+            "15/01"
+        );
+        app.show_preview = false; // comparison view must not export the unnumbered original.
+        app.output_dir = Some(target.path().to_path_buf());
+        app.export_batch();
+        finish_jobs(&mut app);
+        assert_eq!(app.results.iter().filter(|r| r.output.is_some()).count(), 2);
+        assert_eq!(
+            Pdf::open(&target.path().join("a.pdf"))
+                .unwrap()
+                .candidates(1)
+                .unwrap()[0]
+                .text,
+            "15/01"
+        );
+        assert!(target.path().join("b.pdf").exists());
+        assert!(!target.path().join("bad.pdf").exists());
+        assert_eq!(
+            Pdf::open(&a).unwrap().candidates(1).unwrap()[0].text,
+            "01/01"
+        );
+    }
+    #[test]
+    fn closed_pending_import_does_not_reappear() {
+        let mut app = App::initial();
+        app.add_files(vec!["closed.pdf".into()]);
+        let old = app.tabs[0].id;
+        app.close_tab(0);
+        app.add_files(vec!["closed.pdf".into()]);
+        assert_ne!(old, app.tabs[0].id);
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(Ok(Done::Imported(old, Err("stale".into()))))
+            .unwrap();
+        app.poll(&egui::Context::default());
+        assert!(!app.tabs[0].analyzed);
+        assert!(app.tabs[0].error.is_none());
     }
     #[test]
     fn dropped_batch_is_deduplicated_and_queued_while_busy() {

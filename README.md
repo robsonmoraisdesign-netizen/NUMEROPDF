@@ -2,7 +2,7 @@
 
 Aplicação desktop em Rust para organizar PDFs e numerar pranchas. Interface nativa egui; operações PDF e renderização por módulos do [PDFCraft](https://github.com/storytold/pdfcraft), fixados em um submódulo. Sem JavaScript, Electron, Tauri ou serviços remotos de processamento.
 
-**Estado: alpha 0.3.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
+**Estado: alpha 0.4.0.** O núcleo foi compilado e testado em Linux; a interface foi compilada, mas ainda requer validação interativa em Windows. Não é uma versão final.
 
 ## Implementado
 
@@ -81,7 +81,7 @@ Arquitetura e evidências: [docs/VALIDACAO.md](docs/VALIDACAO.md). Licenças do 
 
 ## Uso das melhorias da versão 0.2
 
-Abra ou solte vários PDFs sobre a janela. No painel **Lote**, selecione o documento para conferir a prévia, ajuste a numeração e use **Numerar lote e salvar…**. A opção de última folha adapta o intervalo ao tamanho de cada documento; o número inicial reinicia em cada arquivo. Um erro é informado e os demais PDFs continuam. O limite da lista é de 1.000 arquivos.
+Abra ou solte vários PDFs sobre a janela. Todos são lidos e analisados automaticamente em segundo plano. No painel **Lote**, aguarde a leitura, ajuste a numeração e use **Gerar numeração de todos**. Confira as prévias nas abas, use **Escolher pasta de exportação…** e depois **Exportar todos os PDFs**. O limite da lista é de 1.000 arquivos.
 
 Segure **Ctrl** e gire a roda sobre a página para aproximar ou afastar. A página fica centralizada quando cabe na área disponível; com zoom maior, as barras permitem examinar toda a folha. Ao mudar zoom, a visualização volta ao centro.
 
@@ -90,9 +90,22 @@ Em **Substituir contagem existente**, o tamanho original é detectado por padrã
 ## Versão 0.3 — substituição verificada e abas
 
 - Cada arquivo aberto aparece em uma aba com **×**. Trocar de aba mantém página, zoom, configuração e prévia daquele documento. Fechar a última aba mantém o aplicativo aberto. Há aviso antes de descartar alterações não salvas; troca e fechamento aguardam a operação em andamento terminar.
-- Os documentos são carregados ao selecionar suas abas. Ao sair de uma aba, o cache de renderização e o trabalhador são liberados para limitar o consumo de memória e threads.
+- Os documentos são analisados automaticamente na importação. Ao sair de uma aba, o cache de renderização e o trabalhador são liberados para limitar o consumo de memória e threads.
 - A detecção usa linhas de texto editáveis, incluindo contagens agrupadas com outros textos em um parágrafo e espaços em `01 / 12`. Datas não são consideradas contagem.
 - Ao abrir, o programa sugere o intervalo entre a primeira e a última folha com contagem, preservando capas sem número. Revise o intervalo: uma folha sem contagem no meio continua gerando erro, sem substituição parcial.
 - **Substituir contagem existente** remove as linhas antigas, relê a região e só então insere o novo texto. Contagens previamente sobrepostas na mesma posição também são removidas. Regiões distintas continuam exigindo escolha do usuário.
 - **Selecionar região da contagem** restringe a busca sem mudar para o modo de nova numeração. O modo manual recusa adicionar um número sobre uma contagem detectada e orienta usar substituição.
 - OCR de imagens, texto convertido em curvas e edição de texto dentro de Form XObjects não estão implementados. A verificação cobre os textos editáveis reconhecidos; a prévia deve ser conferida antes de salvar.
+
+## Versão 0.4 — leitura automática e exportação em lote
+
+1. Adicione todos os PDFs pelo seletor ou arraste-os para a janela. O aplicativo lê cada arquivo e detecta seu intervalo de numeração sem precisar selecionar cada aba. Um arquivo inválido é indicado com erro; a leitura continua nos demais.
+2. Ajuste o estilo e o número inicial na aba atual. Por padrão, **Gerar numeração de todos** aplica essas configurações aos documentos válidos, preservando o intervalo de cada um. Desmarque a opção de estilo compartilhado para usar a configuração individual de cada aba. A sequência reinicia em cada documento.
+3. Confira as prévias nas abas. A geração usa o PDF original carregado, sem acumular novas contagens sobre uma prévia anterior.
+4. Escolha a pasta de exportação e clique em **Exportar todos os PDFs**. Cada documento vira um arquivo separado, com o **nome original completo**, sem prefixos nem sufixos. Por exemplo, `SUITE MASTER.pdf` continua `SUITE MASTER.pdf`.
+
+A exportação usa a prévia numerada, mesmo quando a opção antes/depois está mostrando o original. Se ainda não houve numeração, exporta o documento carregado. Arquivos com erro na última geração são informados e não são exportados silenciosamente como originais.
+
+Arquivos de pastas diferentes com nomes iguais (ignorando maiúsculas/minúsculas) são reportados para exportação em destinos separados. Arquivos já existentes nunca são sobrescritos, inclusive os originais. Escolha uma pasta de saída vazia para exportar novamente com os mesmos nomes. O botão de salvar um único PDF também sugere o nome original.
+
+A leitura é sequencial em segundo plano; os PDFs carregados e as prévias ficam em memória para revisão. Lotes muito grandes podem consumir memória significativa. A pasta escolhida é mantida durante a sessão.

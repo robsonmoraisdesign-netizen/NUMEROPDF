@@ -205,10 +205,12 @@ fn batch_continues_after_failure_and_never_overwrites() {
         start: 15,
         ..Default::default()
     };
+    let output_dir = tempfile::tempdir().unwrap();
     let mut progress = vec![];
-    let results = numeropdf::batch::number_files(&inputs, dir.path(), &config, true, |n, total| {
-        progress.push((n, total))
-    });
+    let results =
+        numeropdf::batch::number_files(&inputs, output_dir.path(), &config, true, |n, total| {
+            progress.push((n, total))
+        });
     assert_eq!(progress, vec![(1, 3), (2, 3), (3, 3)]);
     assert!(results[1].error.is_some());
     let out = Pdf::open(results[2].output.as_ref().unwrap()).unwrap();
@@ -218,7 +220,7 @@ fn batch_continues_after_failure_and_never_overwrites() {
         "01/02"
     );
     assert!(
-        numeropdf::batch::number_files(&inputs, dir.path(), &config, true, |_, _| {})
+        numeropdf::batch::number_files(&inputs, output_dir.path(), &config, true, |_, _| {})
             .iter()
             .all(|r| r.error.is_some())
     );
@@ -350,4 +352,103 @@ fn detects_range_after_two_unnumbered_pages() {
     assert_eq!(p.extract(&[0]).unwrap().numbering_range().unwrap(), None);
     assert!(numeropdf::is_page_number(" 01 / 12 "));
     assert!(!numeropdf::is_page_number("12/11/2026"));
+}
+
+#[test]
+fn exports_original_names_and_individual_numbered_documents() {
+    use numeropdf::batch::{ExportInput, NumberInput, export_all, generate_all};
+    use std::sync::Arc;
+    let output = tempfile::tempdir().unwrap();
+    let a = fixture();
+    let b = fixture().extract(&[0, 0, 1]).unwrap();
+    let items = vec![("SUITE MASTER.pdf", a), ("Quarto 02.PDF", b)];
+    let inputs = items
+        .into_iter()
+        .map(|(name, pdf)| {
+            let (first, last) = pdf.numbering_range().unwrap().unwrap();
+            NumberInput {
+                input: std::path::PathBuf::from(name),
+                pdf: Arc::new(pdf),
+                config: Numbering {
+                    first_page: first,
+                    last_page: last,
+                    start: 15,
+                    ..Default::default()
+                },
+            }
+        })
+        .collect();
+    let generated = generate_all(inputs, |_, _| {});
+    let mut progress = vec![];
+    let exports = export_all(
+        generated
+            .into_iter()
+            .map(|g| ExportInput {
+                input: g.input,
+                result: g.result,
+            })
+            .collect(),
+        output.path(),
+        |n, total| progress.push((n, total)),
+    );
+    assert!(exports.iter().all(|e| e.error.is_none()));
+    assert_eq!(progress, vec![(1, 2), (2, 2)]);
+    assert_eq!(
+        exports[0].output.as_ref().unwrap(),
+        &output.path().join("SUITE MASTER.pdf")
+    );
+    assert_eq!(
+        exports[1].output.as_ref().unwrap(),
+        &output.path().join("Quarto 02.PDF")
+    );
+    assert_eq!(
+        Pdf::open(exports[0].output.as_ref().unwrap())
+            .unwrap()
+            .candidates(1)
+            .unwrap()[0]
+            .text,
+        "15/02"
+    );
+    assert_eq!(
+        Pdf::open(exports[1].output.as_ref().unwrap())
+            .unwrap()
+            .candidates(2)
+            .unwrap()[0]
+            .text,
+        "15/01"
+    );
+}
+#[test]
+fn export_reports_duplicate_names_and_failures_without_overwriting() {
+    use numeropdf::batch::{ExportInput, export_all};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = Arc::new(fixture());
+    let item = |path: &str| ExportInput {
+        input: path.into(),
+        result: Ok(pdf.clone()),
+    };
+    std::fs::write(dir.path().join("existing.pdf"), b"original").unwrap();
+    let results = export_all(
+        vec![
+            item("first/SAME.pdf"),
+            item("second/same.PDF"),
+            item("existing.pdf"),
+            ExportInput {
+                input: "bad.pdf".into(),
+                result: Err("Falha de numeração".into()),
+            },
+            item("ok.pdf"),
+        ],
+        dir.path(),
+        |_, _| {},
+    );
+    assert!(results[..4].iter().all(|r| r.error.is_some()));
+    assert!(results[4].output.is_some());
+    assert_eq!(
+        std::fs::read(dir.path().join("existing.pdf")).unwrap(),
+        b"original"
+    );
+    assert!(!dir.path().join("SAME.pdf").exists());
+    assert!(!dir.path().join("bad.pdf").exists());
 }

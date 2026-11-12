@@ -56,3 +56,12 @@ Interface em uma sessão desktop real; executável no Windows; documentos extern
 Validação privada de um documento de 23 páginas: 21 folhas renumeradas com uma única contagem editável em cada folha e duas páginas iniciais intactas. Comparação independente por PyMuPDF não encontrou diferenças de pixels fora da célula da numeração. A página antes não detectada foi renderizada em ampliação para revisão visual. Nenhum PDF de cliente faz parte do repositório.
 
 Testes da interface usam egui sem janela. A interação manual em Windows ainda não foi verificada nesta versão.
+
+
+## Versão 0.4 — importação, geração e exportação do lote
+
+32 testes automatizados passaram. O teste integrado de interface importa arquivos com uma e duas capas mais um arquivo inválido, sem selecionar a segunda aba, confirma a análise de todos, gera as numerações e exporta os dois PDFs válidos com os nomes originais. Verifica também que a comparação antes/depois não altera o resultado exportado e que os originais não foram modificados.
+
+Testes adicionais cobrem nomes com espaços e extensão em maiúsculas, PDFs separados com contagens diferentes, colisões de nomes entre diretórios, arquivo de saída existente, falha de numeração e descarte de resultados de importações de abas fechadas. Testes de regressão anteriores continuam ativos.
+
+Validação: cargo test --locked, cargo fmt --check e cargo clippy --all-targets --no-deps -- -D warnings. Testes egui são sem janela; não foi realizado teste manual no Windows nesta versão.
